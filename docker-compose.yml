@@ -1,0 +1,70 @@
+version: '3.8'
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:password@db:5432/hwp_api
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      - ./app:/app/app
+      - ./storage:/app/storage
+    depends_on:
+      - db
+      - redis
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=hwp_api
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  # Phase 2: Celery Worker
+  # worker:
+  #   build:
+  #     context: .
+  #     dockerfile: docker/Dockerfile
+  #   environment:
+  #     - DATABASE_URL=postgresql+asyncpg://postgres:password@db:5432/hwp_api
+  #     - REDIS_URL=redis://redis:6379/0
+  #   volumes:
+  #     - ./app:/app/app
+  #     - ./storage:/app/storage
+  #   depends_on:
+  #     - db
+  #     - redis
+  #   command: celery -A app.workers.tasks worker --loglevel=info
+
+  # Phase 2: Flower (Celery monitoring)
+  # flower:
+  #   build:
+  #     context: .
+  #     dockerfile: docker/Dockerfile
+  #   environment:
+  #     - CELERY_BROKER_URL=redis://redis:6379/0
+  #   ports:
+  #     - "5555:5555"
+  #   depends_on:
+  #     - redis
+  #   command: celery -A app.workers.tasks flower
+
+volumes:
+  postgres_data:
+  redis_data:
