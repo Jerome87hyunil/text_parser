@@ -58,7 +58,7 @@ services:
     autoDeploy: true
 
   # PostgreSQL Database
-  - type: database
+  - type: pserv
     name: hwp-api-db
     databaseName: hwp_api
     user: hwp_api
