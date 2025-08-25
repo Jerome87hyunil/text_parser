@@ -9,6 +9,8 @@ services:
     region: singapore
     plan: free  # Free tier로 시작
     healthCheckPath: /health
+    numInstances: 1
+    dockerCommand: python run.py
     envVars:
       - key: ENVIRONMENT
         value: production

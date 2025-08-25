@@ -50,17 +50,25 @@ async def lifespan(app: FastAPI):
     os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
     os.makedirs(settings.OUTPUT_DIR, exist_ok=True)
     
-    # Initialize cache
-    await cache_manager.connect()
+    # Skip cache initialization if Redis is not available
+    try:
+        if settings.CACHE_ENABLED and settings.REDIS_URL:
+            await cache_manager.connect()
+            logger.info("Cache connected")
+    except Exception as e:
+        logger.warning(f"Cache connection failed: {e}, continuing without cache")
     
-    # Start memory monitoring
-    memory_task = asyncio.create_task(memory_manager.monitor_memory_async())
+    # Skip memory monitoring for now to simplify startup
+    # memory_task = asyncio.create_task(memory_manager.monitor_memory_async())
     
     yield
     
     # Shutdown
-    memory_task.cancel()
-    await cache_manager.disconnect()
+    # memory_task.cancel()
+    try:
+        await cache_manager.disconnect()
+    except:
+        pass
     logger.info("Shutting down")
 
 
