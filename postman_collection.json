@@ -1,0 +1,492 @@
+{
+  "info": {
+    "name": "HWP API Collection",
+    "description": "Collection for testing HWP/HWPX/PDF extraction API endpoints",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Health Check",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/health",
+          "host": ["{{base_url}}"],
+          "path": ["health"]
+        },
+        "description": "Check API health status"
+      }
+    },
+    {
+      "name": "Authentication",
+      "item": [
+        {
+          "name": "Get Token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    var jsonData = pm.response.json();",
+                  "    pm.environment.set('access_token', jsonData.access_token);",
+                  "    pm.environment.set('token_type', jsonData.token_type);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/x-www-form-urlencoded"
+              }
+            ],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                {
+                  "key": "username",
+                  "value": "{{username}}",
+                  "type": "text"
+                },
+                {
+                  "key": "password",
+                  "value": "{{password}}",
+                  "type": "text"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/token",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "token"]
+            },
+            "description": "Get JWT access token"
+          }
+        },
+        {
+          "name": "Get Current User",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/auth/me",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "auth", "me"]
+            },
+            "description": "Get current authenticated user info"
+          }
+        }
+      ]
+    },
+    {
+      "name": "File Extraction",
+      "item": [
+        {
+          "name": "Extract to JSON",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": [],
+                  "description": "HWP, HWPX, or PDF file"
+                },
+                {
+                  "key": "include_metadata",
+                  "value": "true",
+                  "type": "text",
+                  "description": "Include file metadata",
+                  "disabled": false
+                },
+                {
+                  "key": "include_styles",
+                  "value": "false",
+                  "type": "text",
+                  "description": "Include style information",
+                  "disabled": true
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/extract/hwp-to-json",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "extract", "hwp-to-json"]
+            },
+            "description": "Extract file content to JSON format"
+          }
+        },
+        {
+          "name": "Extract to Text",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": [],
+                  "description": "HWP, HWPX, or PDF file"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/extract/hwp-to-text",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "extract", "hwp-to-text"]
+            },
+            "description": "Extract file content to plain text"
+          }
+        },
+        {
+          "name": "Extract to Markdown",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": [],
+                  "description": "HWP, HWPX, or PDF file"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/extract/hwp-to-markdown",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "extract", "hwp-to-markdown"]
+            },
+            "description": "Extract file content to Markdown format"
+          }
+        },
+        {
+          "name": "Extract to JSON (Authenticated)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": [],
+                  "description": "HWP, HWPX, or PDF file"
+                },
+                {
+                  "key": "include_metadata",
+                  "value": "true",
+                  "type": "text"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/extract/auth/hwp-to-json",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "extract", "auth", "hwp-to-json"]
+            },
+            "description": "Extract file with authentication (higher rate limits)"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Async Processing",
+      "item": [
+        {
+          "name": "Submit Async Job",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    var jsonData = pm.response.json();",
+                  "    pm.environment.set('task_id', jsonData.task_id);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"file\": \"{{file_base64}}\",\n  \"filename\": \"document.hwp\",\n  \"extraction_type\": \"json\",\n  \"options\": {\n    \"include_metadata\": true,\n    \"include_styles\": false\n  }\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/async/submit",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "async", "submit"]
+            },
+            "description": "Submit file for async processing (for large files)"
+          }
+        },
+        {
+          "name": "Check Job Status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/async/status/{{task_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "async", "status", "{{task_id}}"]
+            },
+            "description": "Check async job status"
+          }
+        },
+        {
+          "name": "Get Job Result",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/async/result/{{task_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "async", "result", "{{task_id}}"]
+            },
+            "description": "Get async job result when completed"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Streaming",
+      "item": [
+        {
+          "name": "Stream Extract",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": [],
+                  "description": "Large file for streaming"
+                },
+                {
+                  "key": "chunk_size",
+                  "value": "8192",
+                  "type": "text",
+                  "disabled": true
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/stream/extract",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "stream", "extract"]
+            },
+            "description": "Stream extraction for very large files"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Cache Management",
+      "item": [
+        {
+          "name": "Get Cache Stats",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/cache/stats",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "cache", "stats"]
+            },
+            "description": "Get cache statistics"
+          }
+        },
+        {
+          "name": "Clear Cache",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}",
+                "description": "Admin token required"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/cache/clear",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "cache", "clear"]
+            },
+            "description": "Clear all cache entries (admin only)"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Metrics",
+      "item": [
+        {
+          "name": "Get Metrics",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/metrics",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "metrics"]
+            },
+            "description": "Get Prometheus-compatible metrics"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Security",
+      "item": [
+        {
+          "name": "Security Status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/security/status",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "security", "status"]
+            },
+            "description": "Get security module status"
+          }
+        },
+        {
+          "name": "Virus Scan Stats",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/security/virus-scan/stats",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "security", "virus-scan", "stats"]
+            },
+            "description": "Get virus scan statistics"
+          }
+        }
+      ]
+    },
+    {
+      "name": "File Conversion",
+      "item": [
+        {
+          "name": "Convert HWP to PDF",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": [],
+                  "description": "HWP or HWPX file"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/convert/hwp-to-pdf",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "convert", "hwp-to-pdf"]
+            },
+            "description": "Convert HWP file to PDF format"
+          }
+        }
+      ]
+    }
+  ],
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          ""
+        ]
+      }
+    },
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          ""
+        ]
+      }
+    }
+  ],
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8000",
+      "type": "string"
+    },
+    {
+      "key": "username",
+      "value": "testuser",
+      "type": "string"
+    },
+    {
+      "key": "password",
+      "value": "testpass",
+      "type": "string"
+    },
+    {
+      "key": "access_token",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "token_type",
+      "value": "bearer",
+      "type": "string"
+    },
+    {
+      "key": "task_id",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "file_base64",
+      "value": "",
+      "type": "string"
+    }
+  ]
+}

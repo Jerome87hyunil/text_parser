@@ -5,7 +5,7 @@ Optimized for AI analysis and processing.
 import structlog
 from typing import Dict, Any, List, Optional
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 
 logger = structlog.get_logger()
@@ -37,7 +37,7 @@ class TextExtractor:
         """
         result = {
             "version": "1.0",
-            "extracted_at": datetime.utcnow().isoformat(),
+            "extracted_at": datetime.now(timezone.utc).isoformat(),
         }
         
         # Extract metadata

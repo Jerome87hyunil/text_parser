@@ -9,7 +9,7 @@ from pathlib import Path
 
 
 def test_root_endpoint(client: TestClient):
-    """Test root endpoint."""
+    """Test root endpoint returns API info."""
     response = client.get("/")
     assert response.status_code == 200
     data = response.json()
@@ -17,6 +17,8 @@ def test_root_endpoint(client: TestClient):
     assert "version" in data
     assert "status" in data
     assert data["status"] == "healthy"
+    assert "docs" in data
+    assert data["docs"] == "/docs"
 
 
 def test_health_check(client: TestClient):
@@ -26,8 +28,8 @@ def test_health_check(client: TestClient):
     assert response.json() == {"status": "healthy"}
 
 
-def test_upload_invalid_file_type(client: TestClient):
-    """Test uploading invalid file type."""
+def test_extract_json_invalid_file_type(client: TestClient):
+    """Test extract endpoint with invalid file type."""
     # Create a temporary text file
     with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as tmp:
         tmp.write(b"This is not an HWP file")
@@ -36,20 +38,20 @@ def test_upload_invalid_file_type(client: TestClient):
     try:
         with open(tmp_path, "rb") as f:
             response = client.post(
-                "/api/v1/convert/hwp-to-pdf",
+                "/api/v1/extract/hwp-to-json",
                 files={"file": ("test.txt", f, "text/plain")}
             )
         
         assert response.status_code == 400
-        assert "Invalid file type" in response.json()["detail"]
+        assert "File must be HWP, HWPX, or PDF format" in response.json()["detail"]
     finally:
         os.unlink(tmp_path)
 
 
-def test_upload_oversized_file(client: TestClient):
+def test_extract_json_oversized_file(client: TestClient):
     """Test uploading oversized file."""
-    # Create a file larger than allowed
-    large_content = b"x" * (11 * 1024 * 1024)  # 11MB
+    # Create a file larger than allowed (11MB)
+    large_content = b"x" * (11 * 1024 * 1024)
     
     with tempfile.NamedTemporaryFile(suffix=".hwp", delete=False) as tmp:
         tmp.write(large_content)
@@ -58,41 +60,53 @@ def test_upload_oversized_file(client: TestClient):
     try:
         with open(tmp_path, "rb") as f:
             response = client.post(
-                "/api/v1/convert/hwp-to-pdf",
+                "/api/v1/extract/hwp-to-json",
                 files={"file": ("large.hwp", f, "application/octet-stream")}
             )
         
-        assert response.status_code == 400
+        assert response.status_code == 413
         assert "File too large" in response.json()["detail"]
     finally:
         os.unlink(tmp_path)
 
 
-def test_upload_mock_hwp_file(client: TestClient):
-    """Test uploading a mock HWP file."""
-    # Create a mock HWP file with OLE signature
-    ole_signature = b'\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1'
-    mock_content = ole_signature + b'x' * 1000
-    
-    with tempfile.NamedTemporaryFile(suffix=".hwp", delete=False) as tmp:
-        tmp.write(mock_content)
-        tmp_path = tmp.name
-    
-    try:
-        with open(tmp_path, "rb") as f:
-            response = client.post(
-                "/api/v1/convert/hwp-to-pdf",
-                files={"file": ("test.hwp", f, "application/octet-stream")}
-            )
-        
-        # Should process the file (even if conversion fails, it should return a PDF)
-        assert response.status_code == 200
-        assert response.headers["content-type"] == "application/pdf"
-        
-        # Check that we got some PDF content
-        content = response.content
-        assert len(content) > 0
-        assert content.startswith(b'%PDF')  # PDF signature
-        
-    finally:
-        os.unlink(tmp_path)
+def test_extract_json_missing_file(client: TestClient):
+    """Test extract endpoint with missing file."""
+    response = client.post("/api/v1/extract/hwp-to-json")
+    assert response.status_code == 422  # Unprocessable Entity
+
+
+def test_extract_text_missing_file(client: TestClient):
+    """Test text extraction with missing file."""
+    response = client.post("/api/v1/extract/hwp-to-text")
+    assert response.status_code == 422  # Unprocessable Entity
+
+
+def test_extract_markdown_missing_file(client: TestClient):
+    """Test markdown extraction with missing file."""
+    response = client.post("/api/v1/extract/hwp-to-markdown")
+    assert response.status_code == 422  # Unprocessable Entity
+
+
+def test_swagger_ui_available(client: TestClient):
+    """Test that Swagger UI is available."""
+    response = client.get("/docs")
+    assert response.status_code == 200
+    assert "swagger-ui" in response.text.lower()
+
+
+def test_redoc_available(client: TestClient):
+    """Test that ReDoc is available."""
+    response = client.get("/redoc")
+    assert response.status_code == 200
+    assert "redoc" in response.text.lower()
+
+
+def test_openapi_schema_available(client: TestClient):
+    """Test that OpenAPI schema is available."""
+    response = client.get("/openapi.json")
+    assert response.status_code == 200
+    schema = response.json()
+    assert "openapi" in schema
+    assert "info" in schema
+    assert "paths" in schema

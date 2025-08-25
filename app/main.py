@@ -1,11 +1,23 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from contextlib import asynccontextmanager
 import structlog
 import os
 
 from app.core.config import settings
 from app.api.v1.api import api_router
+from app.core.cache import cache_manager
+from app.utils.memory_manager import memory_manager
+from app.core.exceptions import HWPAPIException
+from app.core.error_handlers import (
+    hwpapi_exception_handler,
+    validation_exception_handler,
+    http_exception_handler,
+    general_exception_handler
+)
+import asyncio
 
 
 # Configure structured logging
@@ -38,16 +50,37 @@ async def lifespan(app: FastAPI):
     os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
     os.makedirs(settings.OUTPUT_DIR, exist_ok=True)
     
+    # Initialize cache
+    await cache_manager.connect()
+    
+    # Start memory monitoring
+    memory_task = asyncio.create_task(memory_manager.monitor_memory_async())
+    
     yield
     
     # Shutdown
+    memory_task.cancel()
+    await cache_manager.disconnect()
     logger.info("Shutting down")
 
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
     version=settings.VERSION,
+    description="HWP/HWPX/PDF 파일에서 텍스트를 추출하여 AI 분석을 위한 구조화된 데이터로 변환하는 API",
     lifespan=lifespan,
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_tags=[
+        {
+            "name": "extract",
+            "description": "문서에서 텍스트 및 구조화된 데이터를 추출하는 엔드포인트",
+        },
+        {
+            "name": "health",
+            "description": "서버 상태 확인 엔드포인트",
+        }
+    ]
 )
 
 # Set up CORS
@@ -59,19 +92,41 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Add exception handlers
+app.add_exception_handler(HWPAPIException, hwpapi_exception_handler)
+app.add_exception_handler(RequestValidationError, validation_exception_handler)
+app.add_exception_handler(StarletteHTTPException, http_exception_handler)
+app.add_exception_handler(Exception, general_exception_handler)
+
 # Include routers
 app.include_router(api_router, prefix=settings.API_V1_PREFIX)
 
 
-@app.get("/")
+@app.get("/", tags=["health"], summary="API 정보 확인")
 async def root():
+    """
+    API 기본 정보를 반환합니다.
+    
+    Returns:
+        project: 프로젝트 이름
+        version: API 버전
+        status: 서버 상태
+        docs: API 문서 URL
+    """
     return {
         "project": settings.PROJECT_NAME,
         "version": settings.VERSION,
-        "status": "healthy"
+        "status": "healthy",
+        "docs": "/docs"
     }
 
 
-@app.get("/health")
+@app.get("/health", tags=["health"], summary="헬스 체크")
 async def health_check():
+    """
+    서버 상태를 확인합니다.
+    
+    Returns:
+        status: 서버 상태 (healthy/unhealthy)
+    """
     return {"status": "healthy"}

@@ -2,7 +2,7 @@
 Pydantic models for extraction endpoints.
 """
 from pydantic import BaseModel, Field
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Union
 from enum import Enum
 from datetime import datetime
 
@@ -83,10 +83,17 @@ class TableInfo(BaseModel):
     summary: str = Field(..., description="Table summary")
 
 
+class ListItemInfo(BaseModel):
+    """List item information model."""
+    text: str = Field(..., description="Item text")
+    level: int = Field(0, description="Nesting level")
+    index: int = Field(..., description="Item index")
+
+
 class ListInfo(BaseModel):
     """List information model."""
     type: str = Field(..., description="List type (ordered, unordered)")
-    items: List[Dict[str, Any]] = Field(..., description="List items")
+    items: List[ListItemInfo] = Field(..., description="List items")
     start_index: int = Field(..., description="Start paragraph index")
     end_index: int = Field(..., description="End paragraph index")
 
@@ -99,12 +106,26 @@ class HeadingInfo(BaseModel):
     type: str = Field(..., description="Heading type classification")
 
 
+class ExtractedContent(BaseModel):
+    """Extracted content model."""
+    version: str = Field("1.0", description="Content format version")
+    extracted_at: str = Field(..., description="Extraction timestamp")
+    metadata: Optional[DocumentMetadata] = Field(None, description="Document metadata")
+    text: str = Field(..., description="Full extracted text")
+    paragraphs: Optional[List[ParagraphInfo]] = Field(None, description="Document paragraphs")
+    tables: Optional[List[TableInfo]] = Field(None, description="Document tables")
+    lists: Optional[List[ListInfo]] = Field(None, description="Document lists")
+    headings: Optional[List[HeadingInfo]] = Field(None, description="Document headings")
+    statistics: Optional[TextStatistics] = Field(None, description="Text statistics")
+    # raw_data field removed to avoid JSON schema issues - use specific fields instead
+
+
 class ExtractResponse(BaseModel):
     """Response model for extraction."""
     success: bool = Field(..., description="Whether extraction was successful")
     filename: str = Field(..., description="Original filename")
     format: ExtractFormat = Field(..., description="Output format")
-    content: Dict[str, Any] = Field(..., description="Extracted content")
+    content: Union[ExtractedContent, str] = Field(..., description="Extracted content (ExtractedContent for JSON, str for text/markdown)")
     message: str = Field(..., description="Response message")
     
     class Config:

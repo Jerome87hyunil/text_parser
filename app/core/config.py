@@ -1,6 +1,5 @@
 from typing import Optional
 from pydantic_settings import BaseSettings
-from pydantic import validator
 
 
 class Settings(BaseSettings):
@@ -19,7 +18,9 @@ class Settings(BaseSettings):
     # File upload
     MAX_UPLOAD_SIZE: int = 10 * 1024 * 1024  # 10MB
     MAX_FILE_SIZE: int = 10 * 1024 * 1024  # 10MB (alias for compatibility)
-    ALLOWED_EXTENSIONS: set[str] = {".hwp", ".hwpx"}
+    CHUNK_SIZE: int = 8192  # 8KB chunks for streaming
+    MAX_MEMORY_SIZE: int = 5 * 1024 * 1024  # 5MB - files larger than this use disk
+    ALLOWED_EXTENSIONS: set[str] = {".hwp", ".hwpx", ".pdf"}
     
     # Storage
     UPLOAD_DIR: str = "uploads"
@@ -32,7 +33,9 @@ class Settings(BaseSettings):
     DATABASE_URL: Optional[str] = None
     
     # Redis (Phase 2)
-    REDIS_URL: Optional[str] = None
+    REDIS_URL: Optional[str] = "redis://localhost:6379"
+    CACHE_ENABLED: bool = False  # Disabled by default, enable with env var
+    CACHE_TTL: int = 3600  # 1 hour default
     
     # Logging
     LOG_LEVEL: str = "INFO"

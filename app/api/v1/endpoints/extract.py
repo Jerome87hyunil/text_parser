@@ -3,7 +3,7 @@ API endpoints for extracting structured data from HWP files.
 Optimized for AI analysis and processing.
 """
 import structlog
-from fastapi import APIRouter, File, UploadFile, HTTPException, Depends
+from fastapi import APIRouter, File, UploadFile, HTTPException, Depends, Query
 from fastapi.responses import JSONResponse
 from typing import Dict, Any, Optional
 import os
@@ -14,19 +14,71 @@ import json
 from app.core.config import get_settings
 from app.services.hwp_parser import HWPParser
 from app.services.text_extractor import TextExtractor
-from app.models.extract import ExtractRequest, ExtractResponse, ExtractFormat
+from app.models.extract import ExtractRequest, ExtractResponse, ExtractFormat, ExtractedContent
+from app.core.cache import cache_manager
+from app.api.v1.endpoints.metrics import track_extraction, track_extraction_duration
+from app.api.v1.endpoints.auth import get_current_active_user
+from app.models.auth import User
+from app.middleware.rate_limit_fixed import rate_limit_dependency
+from app.utils.file_validator import file_validator
+import time
 
 logger = structlog.get_logger()
 router = APIRouter()
 settings = get_settings()
 
 
-@router.post("/hwp-to-json", response_model=ExtractResponse)
+@router.post("/hwp-to-json", 
+    response_model=ExtractResponse,
+    tags=["extract"],
+    summary="문서를 JSON으로 변환",
+    dependencies=[Depends(rate_limit_dependency)],
+    responses={
+        200: {
+            "description": "성공적으로 변환됨",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "success": True,
+                        "filename": "document.hwp",
+                        "format": "json",
+                        "content": {
+                            "text": "추출된 전체 텍스트...",
+                            "metadata": {
+                                "title": "문서 제목",
+                                "author": "작성자",
+                                "created_date": "2024-01-01"
+                            },
+                            "paragraphs": [
+                                {
+                                    "text": "단락 내용",
+                                    "type": "normal",
+                                    "level": 0
+                                }
+                            ],
+                            "tables": [
+                                {
+                                    "rows": 2,
+                                    "cols": 3,
+                                    "data": [["셀1", "셀2", "셀3"]]
+                                }
+                            ]
+                        },
+                        "message": "Content extracted successfully"
+                    }
+                }
+            }
+        },
+        400: {"description": "잘못된 파일 형식"},
+        413: {"description": "파일 크기 초과"},
+        500: {"description": "추출 실패"}
+    }
+)
 async def extract_hwp_to_json(
-    file: UploadFile = File(...),
-    include_metadata: bool = True,
-    include_structure: bool = True,
-    include_statistics: bool = True,
+    file: UploadFile = File(..., description="HWP, HWPX, 또는 PDF 파일"),
+    include_metadata: bool = Query(True, description="문서 메타데이터 포함 여부"),
+    include_structure: bool = Query(True, description="문서 구조 정보 포함 여부"),
+    include_statistics: bool = Query(True, description="텍스트 통계 정보 포함 여부"),
 ) -> ExtractResponse:
     """
     Extract structured data from HWP file in JSON format.
@@ -46,7 +98,7 @@ async def extract_hwp_to_json(
     Returns:
         Structured JSON with extracted content
     """
-    # Validate file
+    # Basic validation
     allowed_extensions = ('.hwp', '.hwpx', '.pdf')
     if not file.filename.lower().endswith(allowed_extensions):
         raise HTTPException(status_code=400, detail="File must be HWP, HWPX, or PDF format")
@@ -71,6 +123,20 @@ async def extract_hwp_to_json(
             content = await file.read()
             async with aiofiles.open(temp_file_path, 'wb') as f:
                 await f.write(content)
+        
+        # Enhanced file validation
+        validation_result = file_validator.validate_file(temp_file_path, file.filename)
+        if not validation_result["valid"]:
+            raise HTTPException(
+                status_code=400,
+                detail=f"File validation failed: {'; '.join(validation_result['errors'])}"
+            )
+        
+        # Log warnings if any
+        if validation_result["warnings"]:
+            logger.warning("File validation warnings", 
+                         warnings=validation_result["warnings"],
+                         filename=file.filename)
         
         # Initialize parser and extractor
         parser = HWPParser()
@@ -97,11 +163,26 @@ async def extract_hwp_to_json(
             tables=len(structured_content.get("tables", []))
         )
         
+        # Create ExtractedContent object from structured_content
+        from datetime import datetime, timezone
+        extracted_content = ExtractedContent(
+            version="1.0",
+            extracted_at=datetime.now(timezone.utc).isoformat() + "Z",
+            metadata=structured_content.get("metadata"),
+            text=structured_content.get("text", ""),
+            paragraphs=structured_content.get("paragraphs"),
+            tables=structured_content.get("tables"),
+            lists=structured_content.get("lists"),
+            headings=structured_content.get("headings"),
+            statistics=structured_content.get("statistics"),
+            # raw_data removed to avoid JSON schema issues
+        )
+        
         return ExtractResponse(
             success=True,
             filename=file.filename,
             format=ExtractFormat.JSON,
-            content=structured_content,
+            content=extracted_content,
             message="Content extracted successfully"
         )
         
@@ -115,10 +196,21 @@ async def extract_hwp_to_json(
             os.unlink(temp_file_path)
 
 
-@router.post("/hwp-to-text", response_model=ExtractResponse)
+@router.post("/hwp-to-text",
+    response_model=ExtractResponse,
+    tags=["extract"],
+    summary="문서를 텍스트로 변환",
+    dependencies=[Depends(rate_limit_dependency)],
+    responses={
+        200: {"description": "성공적으로 변환됨"},
+        400: {"description": "잘못된 파일 형식"},
+        413: {"description": "파일 크기 초과"},
+        500: {"description": "추출 실패"}
+    }
+)
 async def extract_hwp_to_text(
-    file: UploadFile = File(...),
-    preserve_formatting: bool = False,
+    file: UploadFile = File(..., description="HWP, HWPX, 또는 PDF 파일"),
+    preserve_formatting: bool = Query(False, description="줄바꿈 및 공백 유지 여부"),
 ) -> ExtractResponse:
     """
     Extract plain text from HWP file.
@@ -135,7 +227,7 @@ async def extract_hwp_to_text(
     Returns:
         Plain text content
     """
-    # Validate file
+    # Basic validation
     allowed_extensions = ('.hwp', '.hwpx', '.pdf')
     if not file.filename.lower().endswith(allowed_extensions):
         raise HTTPException(status_code=400, detail="File must be HWP, HWPX, or PDF format")
@@ -160,6 +252,20 @@ async def extract_hwp_to_text(
             content = await file.read()
             async with aiofiles.open(temp_file_path, 'wb') as f:
                 await f.write(content)
+        
+        # Enhanced file validation
+        validation_result = file_validator.validate_file(temp_file_path, file.filename)
+        if not validation_result["valid"]:
+            raise HTTPException(
+                status_code=400,
+                detail=f"File validation failed: {'; '.join(validation_result['errors'])}"
+            )
+        
+        # Log warnings if any
+        if validation_result["warnings"]:
+            logger.warning("File validation warnings", 
+                         warnings=validation_result["warnings"],
+                         filename=file.filename)
         
         # Initialize parser
         parser = HWPParser()
@@ -183,7 +289,7 @@ async def extract_hwp_to_text(
             success=True,
             filename=file.filename,
             format=ExtractFormat.TEXT,
-            content={"text": text_content},
+            content=text_content,  # Return string directly for TEXT format
             message="Text extracted successfully"
         )
         
@@ -197,10 +303,21 @@ async def extract_hwp_to_text(
             os.unlink(temp_file_path)
 
 
-@router.post("/hwp-to-markdown", response_model=ExtractResponse)
+@router.post("/hwp-to-markdown",
+    response_model=ExtractResponse,
+    tags=["extract"],
+    summary="문서를 Markdown으로 변환",
+    dependencies=[Depends(rate_limit_dependency)],
+    responses={
+        200: {"description": "성공적으로 변환됨"},
+        400: {"description": "잘못된 파일 형식"},
+        413: {"description": "파일 크기 초과"},
+        500: {"description": "추출 실패"}
+    }
+)
 async def extract_hwp_to_markdown(
-    file: UploadFile = File(...),
-    include_metadata: bool = True,
+    file: UploadFile = File(..., description="HWP, HWPX, 또는 PDF 파일"),
+    include_metadata: bool = Query(True, description="YAML 프론트매터로 메타데이터 포함 여부"),
 ) -> ExtractResponse:
     """
     Extract content from HWP file in Markdown format.
@@ -218,7 +335,7 @@ async def extract_hwp_to_markdown(
     Returns:
         Markdown formatted content
     """
-    # Validate file
+    # Basic validation
     allowed_extensions = ('.hwp', '.hwpx', '.pdf')
     if not file.filename.lower().endswith(allowed_extensions):
         raise HTTPException(status_code=400, detail="File must be HWP, HWPX, or PDF format")
@@ -243,6 +360,20 @@ async def extract_hwp_to_markdown(
             content = await file.read()
             async with aiofiles.open(temp_file_path, 'wb') as f:
                 await f.write(content)
+        
+        # Enhanced file validation
+        validation_result = file_validator.validate_file(temp_file_path, file.filename)
+        if not validation_result["valid"]:
+            raise HTTPException(
+                status_code=400,
+                detail=f"File validation failed: {'; '.join(validation_result['errors'])}"
+            )
+        
+        # Log warnings if any
+        if validation_result["warnings"]:
+            logger.warning("File validation warnings", 
+                         warnings=validation_result["warnings"],
+                         filename=file.filename)
         
         # Initialize parser and extractor
         parser = HWPParser()
@@ -268,7 +399,7 @@ async def extract_hwp_to_markdown(
             success=True,
             filename=file.filename,
             format=ExtractFormat.MARKDOWN,
-            content={"markdown": markdown_content},
+            content=markdown_content,  # Return string directly for MARKDOWN format
             message="Markdown created successfully"
         )
         
