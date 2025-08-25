@@ -1,5 +1,6 @@
-from typing import Optional
+from typing import Optional, Union
 from pydantic_settings import BaseSettings
+from pydantic import field_validator
 
 
 class Settings(BaseSettings):
@@ -13,14 +14,14 @@ class Settings(BaseSettings):
     PORT: int = 8000
     
     # CORS
-    BACKEND_CORS_ORIGINS: list[str] = ["*"]
+    BACKEND_CORS_ORIGINS: Union[list[str], str] = ["*"]
     
     # File upload
     MAX_UPLOAD_SIZE: int = 10 * 1024 * 1024  # 10MB
     MAX_FILE_SIZE: int = 10 * 1024 * 1024  # 10MB (alias for compatibility)
     CHUNK_SIZE: int = 8192  # 8KB chunks for streaming
     MAX_MEMORY_SIZE: int = 5 * 1024 * 1024  # 5MB - files larger than this use disk
-    ALLOWED_EXTENSIONS: set[str] = {".hwp", ".hwpx", ".pdf"}
+    ALLOWED_EXTENSIONS: Union[set[str], str] = {".hwp", ".hwpx", ".pdf"}
     
     # Storage
     UPLOAD_DIR: str = "uploads"
@@ -40,6 +41,26 @@ class Settings(BaseSettings):
     # Logging
     LOG_LEVEL: str = "INFO"
     LOG_FORMAT: str = "json"  # json or plain
+    
+    @field_validator("BACKEND_CORS_ORIGINS", mode="before")
+    @classmethod
+    def assemble_cors_origins(cls, v: Union[str, list[str]]) -> Union[list[str], str]:
+        if isinstance(v, str) and not v.startswith("["):
+            return [i.strip() for i in v.split(",")]
+        elif isinstance(v, (list, str)):
+            return v
+        raise ValueError(v)
+    
+    @field_validator("ALLOWED_EXTENSIONS", mode="before")
+    @classmethod
+    def assemble_allowed_extensions(cls, v: Union[str, set[str]]) -> set[str]:
+        if isinstance(v, str):
+            # Split by comma and add dots if missing
+            extensions = [ext.strip() for ext in v.split(",")]
+            return {ext if ext.startswith(".") else f".{ext}" for ext in extensions}
+        elif isinstance(v, set):
+            return v
+        raise ValueError(v)
     
     class Config:
         env_file = ".env"
