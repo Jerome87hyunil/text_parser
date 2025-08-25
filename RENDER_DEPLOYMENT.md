@@ -36,8 +36,8 @@ git push -u origin main
 `render.yaml` 파일에서 다음 항목들을 수정:
 
 ```yaml
-repo: https://github.com/YOUR_USERNAME/hwp_api.git  # 실제 GitHub 저장소 URL로 변경
-CORS_ORIGINS: https://your-domain.com  # 실제 도메인으로 변경
+repo: https://github.com/Jerome87hyunil/text_parser.git  # ✅ 이미 설정됨
+CORS_ORIGINS: https://hwp-api.onrender.com  # ✅ Render 기본 도메인 설정됨
 ```
 
 ### 3. Render에서 배포
@@ -81,8 +81,10 @@ REDIS_URL     # Redis 연결 시 자동 생성
 SECRET_KEY    # Generate 옵션 사용
 JWT_SECRET_KEY  # Generate 옵션 사용
 
-# 수동 설정 필요
-CORS_ORIGINS=https://your-frontend-domain.com
+# 수동 설정 필요 (render.yaml에 이미 설정됨)
+# CORS_ORIGINS는 자동으로 설정됩니다:
+# - https://hwp-api.onrender.com (Render 기본 도메인)
+# - http://localhost:3000 (로컬 개발용)
 ENVIRONMENT=production
 DEBUG=false
 LOG_LEVEL=INFO
@@ -121,11 +123,17 @@ alembic upgrade head
 ### 2. 헬스체크 확인
 
 ```bash
-curl https://your-app.onrender.com/health
+curl https://hwp-api.onrender.com/health
 ```
 
-### 3. 커스텀 도메인 설정
+### 3. 도메인 정보
 
+**Render 기본 도메인**: `https://hwp-api.onrender.com`
+- 배포 즉시 사용 가능
+- SSL 인증서 자동 포함
+- 무료 제공
+
+**커스텀 도메인 설정 (선택사항)**
 1. Render 대시보드 → Settings → Custom Domains
 2. 도메인 추가 후 DNS 설정
 3. SSL 인증서는 자동 발급

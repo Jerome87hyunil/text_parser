@@ -5,11 +5,11 @@ services:
     name: hwp-api
     runtime: docker
     dockerfilePath: ./Dockerfile.prod
-    repo: https://github.com/YOUR_USERNAME/hwp_api.git  # 실제 GitHub 저장소 URL로 변경
+    repo: https://github.com/Jerome87hyunil/text_parser.git # 실제 GitHub 저장소 URL로 변경
     branch: main
-    plan: starter  # free, starter, standard, pro 중 선택
-    region: singapore  # 아시아 지역 (한국 근접)
-    
+    plan: starter # free, starter, standard, pro 중 선택
+    region: singapore # 아시아 지역 (한국 근접)
+
     # Environment Variables
     envVars:
       - key: ENVIRONMENT
@@ -27,7 +27,7 @@ services:
       - key: ALLOWED_EXTENSIONS
         value: hwp,hwpx,pdf
       - key: CORS_ORIGINS
-        value: https://your-domain.com
+        value: https://hwp-api.onrender.com,http://localhost:3000
       - key: RATE_LIMIT_ENABLED
         value: true
       - key: RATE_LIMIT_DEFAULT
@@ -47,13 +47,13 @@ services:
         generateValue: true
       - key: JWT_SECRET_KEY
         generateValue: true
-    
+
     # Health Check
     healthCheckPath: /health
-    
+
     # Build Configuration
     buildCommand: echo "Build complete"
-    
+
     # Auto-Deploy on Git Push
     autoDeploy: true
 
@@ -62,30 +62,30 @@ services:
     name: hwp-api-db
     databaseName: hwp_api
     user: hwp_api
-    plan: starter  # free, starter, standard, pro 중 선택
+    plan: starter # free, starter, standard, pro 중 선택
     region: singapore
-    ipAllowList: []  # 모든 IP 허용 (필요시 제한)
+    ipAllowList: [] # 모든 IP 허용 (필요시 제한)
 
   # Redis Cache
   - type: redis
     name: hwp-api-redis
-    plan: starter  # free, starter, standard, pro 중 선택
+    plan: starter # free, starter, standard, pro 중 선택
     region: singapore
-    ipAllowList: []  # 모든 IP 허용 (필요시 제한)
+    ipAllowList: [] # 모든 IP 허용 (필요시 제한)
 
   # Background Worker (Celery) - Optional
   - type: worker
     name: hwp-api-worker
     runtime: docker
     dockerfilePath: ./Dockerfile.prod
-    repo: https://github.com/YOUR_USERNAME/hwp_api.git  # 실제 GitHub 저장소 URL로 변경
+    repo: https://github.com/Jerome87hyunil/text_parser.git # 실제 GitHub 저장소 URL로 변경
     branch: main
     plan: starter
     region: singapore
-    
+
     # Worker Start Command
     dockerCommand: celery -A app.core.celery_app worker --loglevel=info --autoscale=4,2
-    
+
     # Environment Variables (동일한 설정 사용)
     envVars:
       - key: ENVIRONMENT
@@ -100,7 +100,7 @@ services:
           name: hwp-api-redis
           property: connectionString
       - key: SECRET_KEY
-        sync: false  # Web service와 동일한 키 사용
+        sync: false # Web service와 동일한 키 사용
       - key: CELERY_AUTOSCALE
         value: true
       - key: CELERY_AUTOSCALE_MAX
