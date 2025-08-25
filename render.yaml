@@ -36,15 +36,16 @@ services:
         generateValue: true
       - key: JWT_SECRET_KEY
         generateValue: true
-      # Database URL will be automatically set when database is created
-      - key: DATABASE_URL
-        fromDatabase:
-          name: hwp-api-db
-          property: connectionString
+      # Database URL - commented out for now since we're not using it yet
+      # - key: DATABASE_URL
+      #   fromDatabase:
+      #     name: hwp-api-db
+      #     property: connectionString
 
-databases:
-  - name: hwp-api-db
-    databaseName: hwp_api
-    user: hwp_api
-    region: singapore
-    plan: free  # Free tier PostgreSQL
+# Databases section - commented out for initial deployment
+# databases:
+#   - name: hwp-api-db
+#     databaseName: hwp_api
+#     user: hwp_api
+#     region: singapore
+#     plan: free  # Free tier PostgreSQL

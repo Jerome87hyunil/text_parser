@@ -1,15 +1,18 @@
 #!/usr/bin/env python
 """
-Development server runner
+Server runner for Render deployment
 """
+import os
 import uvicorn
-from app.core.config import settings
 
 if __name__ == "__main__":
+    # Use PORT environment variable from Render
+    port = int(os.environ.get("PORT", 8000))
+    
+    # Run the application
     uvicorn.run(
         "app.main:app",
-        host=settings.HOST,
-        port=settings.PORT,
-        reload=True,
-        log_level=settings.LOG_LEVEL.lower()
+        host="0.0.0.0",
+        port=port,
+        log_level="info"
     )
