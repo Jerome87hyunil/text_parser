@@ -17,6 +17,14 @@ class HWPParser:
     
     def _init_parsers(self):
         """Initialize available parsers based on installed libraries."""
+        # Try enhanced parser first (highest priority)
+        try:
+            from .enhanced_hwp_parser import enhanced_parser
+            self.parsers.append(("enhanced", enhanced_parser.parse))
+            logger.info("Enhanced HWP parser initialized")
+        except ImportError as e:
+            logger.warning("Enhanced parser not available", error=str(e))
+        
         # Try hwp5
         try:
             from . import hwp5_parser
@@ -114,6 +122,14 @@ class HWPParser:
         # Extract text from parsed content
         text_parts = []
         
+        # First check if there's already a combined text field
+        # (some parsers provide this)
+        if "text" in content and content["text"]:
+            # If text field exists and has content, use it directly
+            # to avoid duplication
+            return content["text"]
+        
+        # Otherwise, extract from paragraphs
         if "paragraphs" in content:
             for para in content["paragraphs"]:
                 if isinstance(para, dict) and "text" in para:
@@ -121,7 +137,14 @@ class HWPParser:
                 elif isinstance(para, str):
                     text_parts.append(para)
         
-        if "text" in content:
-            text_parts.append(content["text"])
+        # Also check tables for text content
+        if "tables" in content:
+            for table in content["tables"]:
+                if isinstance(table, dict) and "rows" in table:
+                    for row in table["rows"]:
+                        if isinstance(row, list):
+                            for cell in row:
+                                if cell and isinstance(cell, str):
+                                    text_parts.append(cell)
         
         return "\n\n".join(text_parts)

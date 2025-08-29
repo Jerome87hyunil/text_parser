@@ -10,6 +10,7 @@
 - 🔐 **보안**: JWT 인증, 파일 검증, Rate Limiting
 - 📊 **모니터링**: Prometheus 메트릭, 상세 로깅
 - 🌐 **웹앱 통합 지원**: CORS, WebSocket, 스트리밍
+- 🆕 **향상된 HWP 파싱**: 8,000자 이상 추출 (기존 995자 → 8,749자, 780% 개선)
 
 ## 🚀 Quick Start
 
@@ -34,6 +35,8 @@ API가 http://localhost:8000 에서 실행됩니다.
 ## 📖 문서
 
 - **[API Integration Guide](API_INTEGRATION_GUIDE.md)** - 웹앱 통합 상세 가이드
+- **[API Usage Guide](API_USAGE_GUIDE.md)** - Render 배포 버전 사용 가이드
+- **[HWP Parser Improvements](HWP_PARSER_IMPROVEMENTS.md)** - HWP 파서 개선 사항 (2025.08.29)
 - **[Quick Start Guide](QUICK_START.md)** - 빠른 시작 가이드
 - **[API Documentation](http://localhost:8000/docs)** - Swagger UI (서버 실행 후)
 - **[Postman Collection](postman_collection.json)** - API 테스트 컬렉션
