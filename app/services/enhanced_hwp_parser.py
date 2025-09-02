@@ -433,10 +433,10 @@ class EnhancedHWPParser:
         """Initialize parser with all available strategies."""
         # Order strategies by effectiveness and completeness
         self.strategies = [
-            BodyTextDirectParser(),      # Most complete extraction
+            BodyTextDirectParser(),      # Most complete extraction (8000+ chars)
             HWP5CLIStrategy(),           # Good fallback with hwp5txt
             HWP5PythonAPIStrategy(),     # When properly configured
-            EnhancedPrvTextStrategy()    # Last resort
+            EnhancedPrvTextStrategy()    # Last resort (only ~1000 chars)
         ]
         logger.info("EnhancedHWPParser initialized", 
                    strategy_count=len(self.strategies))
@@ -464,10 +464,18 @@ class EnhancedHWPParser:
                               file=file_path)
                     result = strategy.parse(file_path)
                     if result and result.get("text"):
-                        logger.info(f"Successfully parsed with {strategy.__class__.__name__}", 
-                                  text_length=len(result["text"]),
-                                  method=result.get("parsing_method"))
-                        return result
+                        text = result.get("text", "")
+                        text_length = len(text)
+                        
+                        # For AI analysis, prioritize text volume over quality
+                        # Accept any result with substantial text (>500 chars)
+                        if text_length > 500:
+                            logger.info(f"Successfully parsed with {strategy.__class__.__name__}", 
+                                      text_length=text_length,
+                                      method=result.get("parsing_method"))
+                            return result
+                        else:
+                            logger.warning(f"{strategy.__class__.__name__} produced insufficient text ({text_length} chars), trying next strategy")
             except Exception as e:
                 error_msg = f"{strategy.__class__.__name__} failed: {str(e)}"
                 errors.append(error_msg)
@@ -483,6 +491,52 @@ class EnhancedHWPParser:
             "errors": errors,
             "parsing_method": "failed"
         }
+    
+    def _is_valid_result(self, text: str) -> bool:
+        """
+        Check if extracted text is valid and not garbled.
+        
+        Args:
+            text: Extracted text to validate
+            
+        Returns:
+            True if text seems valid, False otherwise
+        """
+        if not text or len(text) < 10:
+            return False
+        
+        # Count character types
+        korean_chars = sum(1 for c in text if '가' <= c <= '힣')
+        english_chars = sum(1 for c in text if ('a' <= c <= 'z') or ('A' <= c <= 'Z'))
+        digit_chars = sum(1 for c in text if '0' <= c <= '9')
+        space_chars = sum(1 for c in text if c in ' \n\r\t')
+        
+        # Valid characters (Korean, English, digits, spaces, common punctuation)
+        valid_chars = korean_chars + english_chars + digit_chars + space_chars
+        valid_chars += sum(1 for c in text if c in '.,!?()-[]{}:;"\'/+-=@#$%^&*_~`')
+        
+        total_chars = len(text)
+        valid_ratio = valid_chars / total_chars if total_chars > 0 else 0
+        
+        # Check for common garbled patterns
+        garbled_patterns = ['ࡂ', 'ृ', 'ƀ', 'ą', '褀', '褅', '耈', '蠂']
+        garbled_count = sum(text.count(pattern) for pattern in garbled_patterns)
+        garbled_ratio = garbled_count / total_chars if total_chars > 0 else 0
+        
+        # Text is valid if:
+        # 1. Has reasonable amount of valid characters (>50%)
+        # 2. Not too much garbled text (<10%)
+        # 3. Has some Korean or English content
+        is_valid = (valid_ratio > 0.5 and 
+                   garbled_ratio < 0.1 and 
+                   (korean_chars > 10 or english_chars > 20))
+        
+        if not is_valid:
+            logger.debug(f"Text validation failed - valid: {valid_ratio:.2%}, "
+                        f"garbled: {garbled_ratio:.2%}, "
+                        f"korean: {korean_chars}, english: {english_chars}")
+        
+        return is_valid
     
     def extract_text(self, file_path: str) -> str:
         """
