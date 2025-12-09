@@ -3,6 +3,8 @@ Enhanced HWP Parser with complete text extraction capabilities.
 Implements multiple parsing strategies with fallback mechanisms.
 
 v2.0: 노이즈 문자 제거, 텍스트 정제 파이프라인 강화
+v3.0: HWP 레코드 파싱 완전 재작성 - HWPTAG_PARA_TEXT(0x42)에서만 텍스트 추출
+      바이너리 노이즈(CJK, Cyrillic 등) 완전 제거
 """
 import os
 import re
@@ -18,70 +20,237 @@ import olefile
 
 logger = structlog.get_logger()
 
-# 노이즈 문자 패턴 정의 (HWP에서 자주 발생하는 인코딩 깨짐)
-NOISE_CHARS: Set[str] = {
-    'ࡂ', 'ृ', 'ƀ', 'ą', '褀', '褅', '耈', '蠂',  # 문서에서 언급된 패턴
-    '\x00', '\x01', '\x02', '\x03', '\x04', '\x05',  # 제어 문자
-    '\u200b', '\u200c', '\u200d', '\ufeff',  # 제로폭 문자
-}
+# HWP 레코드 태그 ID (HWP 5.0 스펙)
+HWPTAG_PARA_TEXT = 0x42  # 문단 텍스트 레코드
 
-# 유효한 한글/영문/숫자/기본문장부호 유니코드 범위
-VALID_CHAR_RANGES = [
-    (0x0020, 0x007E),  # ASCII 문자
-    (0x00A0, 0x00FF),  # Latin-1 Supplement
-    (0xAC00, 0xD7A3),  # 한글 음절
-    (0x1100, 0x11FF),  # 한글 자모
-    (0x3130, 0x318F),  # 한글 호환 자모
-    (0x3000, 0x303F),  # CJK 기호 및 문장 부호
-    (0xFF00, 0xFFEF),  # 반각 및 전각 형태
+# 텍스트에서 허용할 유니코드 범위 (엄격한 필터)
+ALLOWED_UNICODE_RANGES = [
+    (0x0020, 0x007E),   # ASCII 기본 (공백, 알파벳, 숫자, 구두점)
+    (0x00A0, 0x00FF),   # Latin-1 Supplement (©, ®, ° 등)
+    (0x2000, 0x206F),   # General Punctuation (…, –, — 등)
+    (0x2190, 0x21FF),   # Arrows (→, ← 등)
+    (0x2200, 0x22FF),   # Mathematical Operators
+    (0x2460, 0x24FF),   # Enclosed Alphanumerics (①, ② 등)
+    (0x3000, 0x303F),   # CJK Symbols and Punctuation
+    (0x3130, 0x318F),   # Hangul Compatibility Jamo
+    (0xAC00, 0xD7A3),   # Hangul Syllables (가-힣)
+    (0xFF01, 0xFF5E),   # Fullwidth ASCII
 ]
 
+# 바이너리 노이즈 패턴 (HWP 레코드 헤더/포맷팅 데이터)
+BINARY_NOISE_PATTERNS = [
+    r'[䀀-俿]',         # CJK Extension B (HWP 바이너리 마커)
+    r'[耀-耿]',         # CJK Unified (HWP 레코드)
+    r'[蠀-蠿]',         # CJK Unified (HWP 레코드)
+    r'[褀-褿]',         # CJK Unified (HWP 포맷)
+    r'[\u0400-\u04FF]', # Cyrillic (HWP 바이너리)
+    r'[\u0100-\u017F]', # Latin Extended-A (노이즈)
+    r'[\u0180-\u024F]', # Latin Extended-B (노이즈)
+    r'[\u0840-\u085F]', # Mandaic (HWP 노이즈)
+    r'[\u0900-\u097F]', # Devanagari (HWP 노이즈)
+    r'[\ue000-\uf8ff]', # Private Use Area
+    r'[\u0000-\u001f]', # Control characters
+    r'[\u007f-\u009f]', # Control characters
+    r'[\ufff0-\uffff]', # Specials
+    r'[贀-贿]+',        # 연속된 CJK 노이즈
+    r'[谀-谿]+',        # 연속된 CJK 노이즈
+    r'[捀-捿]+',        # CJK (HWP 레코드 헤더)
+    r'[勀-勿]+',        # CJK 노이즈
+]
 
-def is_valid_char(c: str) -> bool:
-    """문자가 유효한 범위인지 확인"""
+# 컴파일된 노이즈 패턴
+COMPILED_NOISE_PATTERNS = [re.compile(p) for p in BINARY_NOISE_PATTERNS]
+
+
+def is_valid_korean_char(c: str) -> bool:
+    """한글 문자인지 확인"""
     code = ord(c)
-    for start, end in VALID_CHAR_RANGES:
-        if start <= code <= end:
-            return True
+    # 한글 음절 (가-힣)
+    if 0xAC00 <= code <= 0xD7A3:
+        return True
+    # 한글 자모
+    if 0x3130 <= code <= 0x318F:
+        return True
     return False
 
 
+def is_allowed_char(c: str) -> bool:
+    """허용된 문자 범위인지 확인 (엄격)"""
+    code = ord(c)
+    for start, end in ALLOWED_UNICODE_RANGES:
+        if start <= code <= end:
+            return True
+    # 탭, 줄바꿈 허용
+    if c in '\n\r\t':
+        return True
+    return False
+
+
+def calculate_korean_ratio(text: str) -> float:
+    """텍스트 내 한글 비율 계산"""
+    if not text:
+        return 0.0
+    korean_count = sum(1 for c in text if is_valid_korean_char(c))
+    # 공백 제외한 문자 수
+    non_space = sum(1 for c in text if not c.isspace())
+    if non_space == 0:
+        return 0.0
+    return korean_count / non_space
+
+
 def clean_hwp_text(text: str) -> str:
-    """HWP 텍스트에서 노이즈 문자 제거 및 정제
+    """HWP 텍스트 공격적 정제 (바이너리 노이즈 완전 제거)
+
+    v3.0: 바이너리 패턴 기반 노이즈 제거로 완전히 재작성
 
     Args:
         text: 추출된 원본 텍스트
 
     Returns:
-        정제된 텍스트
+        정제된 텍스트 (한글/영문/숫자/기본구두점만 포함)
     """
     if not text:
         return ""
 
-    # 노이즈 문자 집합 제거
-    for noise_char in NOISE_CHARS:
-        text = text.replace(noise_char, '')
+    # 1단계: 바이너리 노이즈 패턴 제거
+    for pattern in COMPILED_NOISE_PATTERNS:
+        text = pattern.sub('', text)
 
-    # 유효하지 않은 문자 필터링 (한글, 영어, 숫자, 기본 문장부호만 유지)
+    # 2단계: 허용된 문자만 유지 (매우 엄격)
     cleaned_chars = []
     for c in text:
-        if is_valid_char(c) or c in '\n\r\t':
+        if is_allowed_char(c):
             cleaned_chars.append(c)
-        # 일부 유효하지 않은 문자는 공백으로 대체
-        elif ord(c) >= 32:
-            # 스킵하지 않고 일단 유지 (너무 많이 제거하면 정보 손실)
-            cleaned_chars.append(c)
+        elif c.isspace():
+            cleaned_chars.append(' ')
+        # 그 외 문자는 무시
 
     result = ''.join(cleaned_chars)
 
-    # 연속 공백 정리
-    result = re.sub(r'[ \t]+', ' ', result)
-    # 연속 줄바꿈 정리 (3개 이상 → 2개)
-    result = re.sub(r'\n{3,}', '\n\n', result)
-    # 앞뒤 공백 제거
-    result = result.strip()
+    # 3단계: 연속된 노이즈 잔여물 제거 (3자 미만의 비한글 청크)
+    # 패턴: 공백으로 구분된 짧은 비한글 토큰 제거
+    tokens = result.split()
+    cleaned_tokens = []
+    for token in tokens:
+        # 토큰에 한글이 있거나, 길이가 2 이상인 영숫자
+        if any(is_valid_korean_char(c) for c in token):
+            cleaned_tokens.append(token)
+        elif len(token) >= 2 and token.replace('.', '').replace(',', '').replace('-', '').replace(':', '').isalnum():
+            cleaned_tokens.append(token)
+        elif token in ['○', '●', '◎', '△', '▲', '□', '■', '※', '☎', '→', '←', '↔', '⇒']:
+            cleaned_tokens.append(token)
+        # 짧거나 무의미한 토큰은 무시
 
-    return result
+    result = ' '.join(cleaned_tokens)
+
+    # 4단계: 공백 정리
+    result = re.sub(r'[ \t]+', ' ', result)
+    result = re.sub(r'\n[ \t]+', '\n', result)
+    result = re.sub(r'[ \t]+\n', '\n', result)
+    result = re.sub(r'\n{3,}', '\n\n', result)
+
+    return result.strip()
+
+
+def extract_clean_text_from_hwp_data(data: bytes) -> str:
+    """HWP 레코드에서 순수 텍스트만 추출
+
+    HWP 5.0 레코드 구조를 파싱하여 HWPTAG_PARA_TEXT(0x42) 레코드에서만
+    텍스트를 추출합니다.
+
+    Args:
+        data: 압축 해제된 BodyText 스트림 데이터
+
+    Returns:
+        추출된 순수 텍스트
+    """
+    text_parts = []
+    offset = 0
+
+    while offset < len(data) - 4:
+        # 레코드 헤더 읽기 (4바이트)
+        try:
+            record_header = struct.unpack_from('<I', data, offset)[0]
+        except struct.error:
+            break
+
+        tag_id = record_header & 0x3FF        # bits 0-9
+        level = (record_header >> 10) & 0x3FF  # bits 10-19
+        size = (record_header >> 20) & 0xFFF   # bits 20-31
+
+        # 확장 크기 처리
+        if size == 0xFFF:
+            if offset + 8 > len(data):
+                break
+            size = struct.unpack_from('<I', data, offset + 4)[0]
+            data_offset = offset + 8
+        else:
+            data_offset = offset + 4
+
+        # 데이터 범위 확인
+        if data_offset + size > len(data):
+            break
+
+        # HWPTAG_PARA_TEXT (0x42 = 66) 레코드에서만 텍스트 추출
+        if tag_id == HWPTAG_PARA_TEXT:
+            record_data = data[data_offset:data_offset + size]
+            text = _decode_para_text(record_data)
+            if text:
+                text_parts.append(text)
+
+        # 다음 레코드로 이동
+        offset = data_offset + size
+
+    return '\n'.join(text_parts)
+
+
+def _decode_para_text(data: bytes) -> str:
+    """HWP 문단 텍스트 레코드 디코딩
+
+    HWP 문단 텍스트는 UTF-16LE로 인코딩되어 있으며,
+    특수 제어 문자(0x00-0x1F)가 포함될 수 있습니다.
+
+    Args:
+        data: HWPTAG_PARA_TEXT 레코드 데이터
+
+    Returns:
+        디코딩된 텍스트
+    """
+    if len(data) < 2:
+        return ""
+
+    try:
+        # UTF-16LE 디코딩
+        text = data.decode('utf-16le', errors='ignore')
+    except:
+        return ""
+
+    # HWP 특수 제어 문자 처리
+    cleaned = []
+    i = 0
+    while i < len(text):
+        c = text[i]
+        code = ord(c)
+
+        # HWP 제어 문자 (0x00-0x1F)
+        if code < 0x20:
+            if code == 0x0A:  # 줄바꿈
+                cleaned.append('\n')
+            elif code == 0x0D:  # 캐리지 리턴
+                pass  # 무시
+            elif code == 0x09:  # 탭
+                cleaned.append(' ')
+            # 기타 제어 문자는 무시 (필드 시작, 그림 등)
+            i += 1
+            continue
+
+        # 일반 텍스트
+        if is_allowed_char(c):
+            cleaned.append(c)
+
+        i += 1
+
+    return ''.join(cleaned).strip()
 
 
 class IHWPParsingStrategy(ABC):
@@ -169,72 +338,47 @@ class HWP5PythonAPIStrategy(IHWPParsingStrategy):
         return metadata
     
     def _extract_section_text(self, section_data) -> tuple:
-        """Extract text from a section stream."""
+        """Extract text from a section stream using proper HWP record parsing.
+
+        v3.0: HWP 레코드 구조를 정확히 파싱하여 노이즈 없는 텍스트 추출
+        """
         text_parts = []
         paragraphs = []
-        
+
         try:
             # Read and decompress section data
             compressed_data = section_data.read()
-            
+
             # HWP5 sections are zlib compressed
             try:
                 decompressed = zlib.decompress(compressed_data, -15)
             except:
-                # Try with different window bits
                 try:
                     decompressed = zlib.decompress(compressed_data)
                 except:
                     return "", []
-            
-            # Parse records from decompressed data
-            offset = 0
-            while offset < len(decompressed):
-                if offset + 4 > len(decompressed):
-                    break
-                    
-                # Read record header (4 bytes)
-                record_header = struct.unpack_from('<I', decompressed, offset)[0]
-                tag_id = record_header & 0x3FF
-                level = (record_header >> 10) & 0x3FF
-                size = (record_header >> 20) & 0xFFF
-                
-                if size == 0xFFF:
-                    # Extended size
-                    if offset + 8 > len(decompressed):
-                        break
-                    size = struct.unpack_from('<I', decompressed, offset + 4)[0]
-                    data_offset = offset + 8
-                else:
-                    data_offset = offset + 4
-                
-                # HWPTAG_PARA_TEXT = 0x42
-                if tag_id == 0x42:
-                    # Extract text from paragraph
-                    if data_offset + size <= len(decompressed):
-                        text_data = decompressed[data_offset:data_offset + size]
-                        text = self._decode_text(text_data)
-                        if text:
-                            text_parts.append(text)
-                            paragraphs.append({"text": text, "level": level})
-                
-                offset = data_offset + size
-                
+
+            # HWP 레코드 파싱 함수 사용 (HWPTAG_PARA_TEXT만 추출)
+            extracted_text = extract_clean_text_from_hwp_data(decompressed)
+
+            if extracted_text:
+                # 추가 텍스트 정제
+                cleaned_text = clean_hwp_text(extracted_text)
+
+                if cleaned_text:
+                    text_parts = [cleaned_text]
+                    paragraphs = [{"text": para.strip()}
+                                for para in cleaned_text.split('\n')
+                                if para.strip()]
+
         except Exception as e:
             logger.debug(f"Error extracting section text: {e}")
-        
+
         return "\n".join(text_parts), paragraphs
-    
+
     def _decode_text(self, data: bytes) -> str:
-        """Decode text data from HWP format."""
-        try:
-            # HWP uses UTF-16LE for text
-            text = data.decode('utf-16le', errors='ignore')
-            # Remove control characters
-            text = ''.join(char for char in text if ord(char) >= 32 or char in '\n\r\t')
-            return text.strip()
-        except:
-            return ""
+        """Decode text data from HWP format (레거시 메서드, _decode_para_text 권장)."""
+        return _decode_para_text(data)
 
 
 class HWP5CLIStrategy(IHWPParsingStrategy):
@@ -357,69 +501,42 @@ class BodyTextDirectParser(IHWPParsingStrategy):
         return metadata
     
     def _parse_bodytext_stream(self, data: bytes) -> tuple:
-        """Parse a BodyText stream."""
+        """Parse a BodyText stream using proper HWP record parsing.
+
+        v3.0: HWP 레코드 구조를 정확히 파싱하여 HWPTAG_PARA_TEXT(0x42)
+        레코드에서만 텍스트를 추출합니다. 바이너리 노이즈가 완전히 제거됩니다.
+        """
         text_parts = []
         paragraphs = []
-        
+
         try:
-            # Try to decompress
+            # 1단계: 압축 해제
             try:
                 decompressed = zlib.decompress(data, -15)
             except:
                 try:
                     decompressed = zlib.decompress(data)
                 except:
-                    # Not compressed or different format
+                    # 압축되지 않은 데이터
                     decompressed = data
-            
-            # Extract text using pattern matching
-            # Look for Unicode text patterns
-            text_chunks = []
-            i = 0
-            while i < len(decompressed) - 1:
-                # Look for potential UTF-16LE text
-                if i + 1 < len(decompressed):
-                    char = decompressed[i:i+2]
-                    try:
-                        decoded = char.decode('utf-16le', errors='ignore')
-                        if decoded and ord(decoded) >= 32:
-                            # Start of text block
-                            text_block = bytearray()
-                            while i < len(decompressed) - 1:
-                                text_block.extend(decompressed[i:i+2])
-                                i += 2
-                                # Check for end of text
-                                if i < len(decompressed) - 1:
-                                    next_char = decompressed[i:i+2]
-                                    try:
-                                        next_decoded = next_char.decode('utf-16le', errors='ignore')
-                                        if not next_decoded or ord(next_decoded) < 32:
-                                            break
-                                    except:
-                                        break
-                            
-                            text = text_block.decode('utf-16le', errors='ignore').strip()
-                            if text and len(text) > 2:
-                                text_chunks.append(text)
-                    except:
-                        pass
-                i += 2
-            
-            # Combine text chunks
-            if text_chunks:
-                full_text = ' '.join(text_chunks)
-                # Clean up text
-                full_text = ''.join(char for char in full_text 
-                                  if ord(char) >= 32 or char in '\n\r\t')
-                
-                text_parts = [full_text]
-                paragraphs = [{"text": para.strip()} 
-                            for para in full_text.split('\n') 
-                            if para.strip()]
-            
+
+            # 2단계: HWP 레코드 파싱 (HWPTAG_PARA_TEXT만 추출)
+            # 이 함수는 바이너리 노이즈 없이 순수 텍스트만 추출합니다
+            extracted_text = extract_clean_text_from_hwp_data(decompressed)
+
+            if extracted_text:
+                # 3단계: 추가 텍스트 정제
+                cleaned_text = clean_hwp_text(extracted_text)
+
+                if cleaned_text:
+                    text_parts = [cleaned_text]
+                    paragraphs = [{"text": para.strip()}
+                                for para in cleaned_text.split('\n')
+                                if para.strip()]
+
         except Exception as e:
             logger.debug(f"Error parsing BodyText stream: {e}")
-        
+
         return "\n".join(text_parts), paragraphs
 
 
