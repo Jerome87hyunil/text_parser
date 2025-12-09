@@ -5,6 +5,7 @@ Implements multiple parsing strategies with fallback mechanisms.
 v2.0: 노이즈 문자 제거, 텍스트 정제 파이프라인 강화
 v3.0: HWP 레코드 파싱 완전 재작성 - HWPTAG_PARA_TEXT(0x42)에서만 텍스트 추출
       바이너리 노이즈(CJK, Cyrillic 등) 완전 제거
+v3.1: ASCII 반복 패턴 노이즈 제거 (LLLLLL, KKKKKK 등)
 """
 import os
 import re
@@ -58,8 +59,173 @@ BINARY_NOISE_PATTERNS = [
     r'[勀-勿]+',        # CJK 노이즈
 ]
 
+# ASCII 반복 패턴 노이즈 (이미지/바이너리 데이터)
+ASCII_REPEAT_PATTERNS = [
+    r'(.)\1{3,}',                    # 같은 문자 4회 이상 반복 (LLLL)
+    r'[A-Z]{8,}',                    # 대문자만 8개 이상 연속
+    r'[a-z]{10,}',                   # 소문자만 10개 이상 연속
+    r'[A-Za-z]{15,}',                # 알파벳만 15개 이상 연속
+    r'[#$%&*+\-=<>?!@\'\"]{3,}',     # 기호 3개 이상 연속
+    r'[0-9#$%&*+\-=]{10,}',          # 숫자/기호 혼합 10자 이상
+    r'[\(\)\[\]\{\}]{3,}',           # 괄호 3개 이상 연속
+    r'[,\.]{3,}',                    # 쉼표/마침표 3개 이상 연속
+    r'[A-Za-z0-9#$%&*+\-=<>?!@\'"(){}\[\],\.;:]{30,}',  # 한글 없이 30자 이상 연속
+]
+
 # 컴파일된 노이즈 패턴
 COMPILED_NOISE_PATTERNS = [re.compile(p) for p in BINARY_NOISE_PATTERNS]
+COMPILED_ASCII_PATTERNS = [re.compile(p) for p in ASCII_REPEAT_PATTERNS]
+
+
+def remove_ascii_noise(text: str) -> str:
+    """ASCII 반복 패턴 노이즈 제거
+
+    v3.1: 이미지/바이너리 데이터에서 발생하는 ASCII 반복 패턴 제거
+    예: LLLLLLLLL, KKKKKKKK, ##$$%%&& 등
+
+    Args:
+        text: 정제할 텍스트
+
+    Returns:
+        ASCII 노이즈가 제거된 텍스트
+    """
+    if not text:
+        return ""
+
+    # ASCII 반복 패턴 제거
+    for pattern in COMPILED_ASCII_PATTERNS:
+        text = pattern.sub('', text)
+
+    return text
+
+
+def split_and_clean_chunks(text: str) -> str:
+    """긴 텍스트를 청크로 분할하고 노이즈 청크 제거
+
+    공백이 없는 긴 문자열에서 한글과 노이즈가 섞인 경우를 처리합니다.
+
+    Args:
+        text: 정제할 텍스트
+
+    Returns:
+        정제된 텍스트
+    """
+    if not text:
+        return ""
+
+    # 한글 문자를 기준으로 청크 분할
+    result_parts = []
+    current_chunk = []
+    prev_korean = False
+
+    for c in text:
+        is_korean = is_valid_korean_char(c)
+
+        # 한글과 비한글 경계에서 분할
+        if is_korean != prev_korean and current_chunk:
+            chunk = ''.join(current_chunk)
+            if prev_korean:
+                # 한글 청크는 유지
+                result_parts.append(chunk)
+            else:
+                # 비한글 청크는 짧은 것만 유지 (10자 이하)
+                if len(chunk) <= 10:
+                    result_parts.append(chunk)
+            current_chunk = []
+
+        current_chunk.append(c)
+        prev_korean = is_korean
+
+    # 마지막 청크 처리
+    if current_chunk:
+        chunk = ''.join(current_chunk)
+        if prev_korean:
+            result_parts.append(chunk)
+        elif len(chunk) <= 10:
+            result_parts.append(chunk)
+
+    return ''.join(result_parts)
+
+
+def is_meaningful_token(token: str) -> bool:
+    """토큰이 의미 있는 텍스트인지 확인
+
+    v3.1: 더 공격적인 노이즈 필터링
+
+    Args:
+        token: 검사할 토큰
+
+    Returns:
+        의미 있으면 True, 노이즈면 False
+    """
+    if not token:
+        return False
+
+    # 한글이 포함되어 있으면 유의미
+    korean_count = sum(1 for c in token if is_valid_korean_char(c))
+    if korean_count > 0:
+        # 한글 비율이 너무 낮으면 (10% 미만) 노이즈 가능성
+        if len(token) > 10 and korean_count / len(token) < 0.1:
+            return False
+        return True
+
+    # 한글 없는 토큰 검증 (더 엄격)
+
+    # 토큰 길이가 너무 길면 (10자 초과) 노이즈 가능성
+    if len(token) > 10:
+        return False
+
+    # 반복 문자 비율 체크
+    if len(token) > 4:
+        unique_chars = len(set(token))
+        repeat_ratio = 1 - (unique_chars / len(token))
+        # 반복 비율이 50% 이상이면 노이즈
+        if repeat_ratio > 0.5:
+            return False
+
+    # 숫자만 포함 (날짜, 전화번호 등) - 허용
+    if token.isdigit():
+        return True
+
+    # 짧은 영숫자 (10자 이하) - 허용
+    stripped = token.replace('.', '').replace(',', '').replace('-', '').replace(':', '').replace('/', '')
+    if stripped.isalnum() and len(stripped) <= 10:
+        return True
+
+    # 특수 기호만으로 구성된 토큰 - 2자 이하만 허용
+    if all(c in '#$%&*+=-<>?!@\'\"()[]{}.,;:' for c in token):
+        return len(token) <= 2
+
+    return False
+
+
+def is_garbage_chunk(text: str, min_korean_ratio: float = 0.05) -> bool:
+    """텍스트 청크가 전체적으로 노이즈인지 확인
+
+    Args:
+        text: 검사할 텍스트 청크
+        min_korean_ratio: 최소 한글 비율 (기본 5%)
+
+    Returns:
+        노이즈면 True, 유의미하면 False
+    """
+    if not text or len(text) < 10:
+        return True
+
+    # 한글 비율 계산
+    korean_count = sum(1 for c in text if is_valid_korean_char(c))
+    non_space = sum(1 for c in text if not c.isspace())
+
+    if non_space == 0:
+        return True
+
+    korean_ratio = korean_count / non_space
+
+    # 한글 비율이 최소 기준 미만이면 노이즈
+    if korean_ratio < min_korean_ratio:
+        return True
+
+    return False
 
 
 def is_valid_korean_char(c: str) -> bool:
@@ -102,6 +268,7 @@ def clean_hwp_text(text: str) -> str:
     """HWP 텍스트 공격적 정제 (바이너리 노이즈 완전 제거)
 
     v3.0: 바이너리 패턴 기반 노이즈 제거로 완전히 재작성
+    v3.1: ASCII 반복 패턴 노이즈 제거 추가 (LLLLLL, KKKKKK 등)
 
     Args:
         text: 추출된 원본 텍스트
@@ -112,9 +279,15 @@ def clean_hwp_text(text: str) -> str:
     if not text:
         return ""
 
-    # 1단계: 바이너리 노이즈 패턴 제거
+    # 1단계: 바이너리 노이즈 패턴 제거 (CJK, Cyrillic 등)
     for pattern in COMPILED_NOISE_PATTERNS:
         text = pattern.sub('', text)
+
+    # 1.5단계: ASCII 반복 패턴 노이즈 제거 (LLLLL, KKKKK 등)
+    text = remove_ascii_noise(text)
+
+    # 1.7단계: 한글/비한글 청크 분할 및 긴 비한글 청크 제거
+    text = split_and_clean_chunks(text)
 
     # 2단계: 허용된 문자만 유지 (매우 엄격)
     cleaned_chars = []
@@ -127,21 +300,21 @@ def clean_hwp_text(text: str) -> str:
 
     result = ''.join(cleaned_chars)
 
-    # 3단계: 연속된 노이즈 잔여물 제거 (3자 미만의 비한글 청크)
-    # 패턴: 공백으로 구분된 짧은 비한글 토큰 제거
+    # 3단계: 의미 없는 토큰 제거 (is_meaningful_token 사용)
     tokens = result.split()
     cleaned_tokens = []
     for token in tokens:
-        # 토큰에 한글이 있거나, 길이가 2 이상인 영숫자
-        if any(is_valid_korean_char(c) for c in token):
-            cleaned_tokens.append(token)
-        elif len(token) >= 2 and token.replace('.', '').replace(',', '').replace('-', '').replace(':', '').isalnum():
+        if is_meaningful_token(token):
             cleaned_tokens.append(token)
         elif token in ['○', '●', '◎', '△', '▲', '□', '■', '※', '☎', '→', '←', '↔', '⇒']:
             cleaned_tokens.append(token)
-        # 짧거나 무의미한 토큰은 무시
+        # 무의미한 토큰은 무시
 
     result = ' '.join(cleaned_tokens)
+
+    # 3.5단계: 노이즈 청크 검증 (한글 비율 5% 미만이면 폐기)
+    if is_garbage_chunk(result, min_korean_ratio=0.05):
+        return ""
 
     # 4단계: 공백 정리
     result = re.sub(r'[ \t]+', ' ', result)
