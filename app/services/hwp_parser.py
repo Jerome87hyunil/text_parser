@@ -1,8 +1,29 @@
+"""
+HWP Parser - 메인 파서 오케스트레이터
+
+v1.1: 싱글톤 패턴 적용 (메모리 최적화)
+"""
 import structlog
 from typing import Dict, List, Optional, Any
 import os
 
 logger = structlog.get_logger()
+
+# 싱글톤 인스턴스
+_parser_instance: Optional["HWPParser"] = None
+
+
+def get_parser() -> "HWPParser":
+    """싱글톤 HWPParser 인스턴스 반환
+
+    v1.1: 매 요청마다 새 인스턴스 생성 대신 싱글톤 사용
+    메모리 효율성 향상
+    """
+    global _parser_instance
+    if _parser_instance is None:
+        _parser_instance = HWPParser()
+        logger.info("HWPParser singleton created")
+    return _parser_instance
 
 
 class HWPParser:

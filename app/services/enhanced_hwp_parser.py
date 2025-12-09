@@ -8,6 +8,11 @@ v3.0: HWP 레코드 파싱 완전 재작성 - HWPTAG_PARA_TEXT(0x42)에서만 �
 v3.1: ASCII 반복 패턴 노이즈 제거 (LLLLLL, KKKKKK 등)
 v3.2: 스마트 폴백 - BodyText 한글 비율 낮으면 PrvText로 자동 전환
       특정 HWP 파일에서 PARA_TEXT 추출 실패 시 PrvText 우선 사용
+v3.3: 메모리 최적화 - 512MB RAM 환경 지원
+      - 명시적 GC 호출
+      - 파일 크기 제한 (10MB)
+      - 청크 단위 처리
+      - 대용량 객체 명시적 해제
 """
 import os
 import re
@@ -15,11 +20,16 @@ import zlib
 import struct
 import subprocess
 import tempfile
+import gc
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional, List, Set
 from pathlib import Path
 import structlog
 import olefile
+
+# 메모리 제한 (512MB 환경용)
+MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024  # 10MB
+MAX_DECOMPRESSED_SIZE = 50 * 1024 * 1024  # 50MB (압축 해제 후 최대)
 
 logger = structlog.get_logger()
 
@@ -609,57 +619,93 @@ class HWP5CLIStrategy(IHWPParsingStrategy):
 
 class BodyTextDirectParser(IHWPParsingStrategy):
     """Strategy for direct BodyText stream parsing."""
-    
+
     def can_parse(self, file_path: str) -> bool:
         """Check if file can be opened with olefile."""
         try:
+            # v3.3: 파일 크기 먼저 체크
+            file_size = os.path.getsize(file_path)
+            if file_size > MAX_FILE_SIZE_BYTES:
+                logger.warning(f"File too large for BodyText parsing: {file_size} bytes")
+                return False
             return olefile.isOleFile(file_path)
         except:
             return False
-    
+
     def parse(self, file_path: str) -> Optional[Dict[str, Any]]:
-        """Parse BodyText streams directly."""
+        """Parse BodyText streams directly.
+
+        v3.3: 메모리 최적화 - 스트림 단위 처리 및 명시적 정리
+        """
+        ole = None
         try:
             logger.info("Parsing BodyText directly", file=file_path)
-            
-            with olefile.OleFileIO(file_path) as ole:
-                result = {
-                    "text": "",
-                    "paragraphs": [],
-                    "tables": [],
-                    "metadata": self._extract_metadata(ole),
-                    "parsing_method": "bodytext_direct"
-                }
-                
-                all_text = []
-                all_paragraphs = []
-                
-                # Find all BodyText sections
-                for entry in ole.listdir():
-                    if len(entry) == 2 and entry[0] == 'BodyText':
-                        section_name = '/'.join(entry)
-                        try:
-                            stream = ole.openstream(entry)
-                            text, paragraphs = self._parse_bodytext_stream(stream.read())
-                            if text:
-                                all_text.append(text)
-                                all_paragraphs.extend(paragraphs)
-                        except Exception as e:
-                            logger.debug(f"Error parsing {section_name}: {e}")
-                
-                result["text"] = "\n\n".join(all_text)
-                result["paragraphs"] = all_paragraphs
-                
-                if result["text"]:
-                    logger.info("Successfully parsed BodyText", 
-                              text_length=len(result["text"]))
-                    return result
-                
+
+            ole = olefile.OleFileIO(file_path)
+            result = {
+                "text": "",
+                "paragraphs": [],
+                "tables": [],
+                "metadata": self._extract_metadata(ole),
+                "parsing_method": "bodytext_direct"
+            }
+
+            all_text = []
+            all_paragraphs = []
+
+            # Find all BodyText sections
+            entries = list(ole.listdir())  # 복사본 생성
+            for entry in entries:
+                if len(entry) == 2 and entry[0] == 'BodyText':
+                    section_name = '/'.join(entry)
+                    stream_data = None
+                    try:
+                        stream = ole.openstream(entry)
+                        stream_data = stream.read()
+                        stream.close()  # v3.3: 명시적 스트림 닫기
+
+                        text, paragraphs = self._parse_bodytext_stream(stream_data)
+
+                        # v3.3: 스트림 데이터 즉시 해제
+                        del stream_data
+                        stream_data = None
+
+                        if text:
+                            all_text.append(text)
+                            all_paragraphs.extend(paragraphs)
+                    except Exception as e:
+                        logger.debug(f"Error parsing {section_name}: {e}")
+                    finally:
+                        if stream_data is not None:
+                            del stream_data
+
+            result["text"] = "\n\n".join(all_text)
+            result["paragraphs"] = all_paragraphs
+
+            # v3.3: 중간 리스트 해제
+            del all_text
+            del all_paragraphs
+            del entries
+
+            if result["text"]:
+                logger.info("Successfully parsed BodyText",
+                          text_length=len(result["text"]))
+                return result
+
             return None
-            
+
         except Exception as e:
             logger.warning(f"BodyText direct parser failed: {e}")
             return None
+        finally:
+            # v3.3: OLE 파일 명시적 닫기 및 GC
+            if ole is not None:
+                try:
+                    ole.close()
+                except:
+                    pass
+                del ole
+            gc.collect()
     
     def _extract_metadata(self, ole) -> Dict[str, Any]:
         """Extract metadata from OLE file."""
@@ -680,11 +726,18 @@ class BodyTextDirectParser(IHWPParsingStrategy):
 
         v3.0: HWP 레코드 구조를 정확히 파싱하여 HWPTAG_PARA_TEXT(0x42)
         레코드에서만 텍스트를 추출합니다. 바이너리 노이즈가 완전히 제거됩니다.
+        v3.3: 메모리 최적화 - 명시적 객체 해제 및 크기 제한
         """
         text_parts = []
         paragraphs = []
+        decompressed = None
 
         try:
+            # v3.3: 입력 데이터 크기 체크
+            if len(data) > MAX_FILE_SIZE_BYTES:
+                logger.warning(f"BodyText stream too large: {len(data)} bytes, skipping")
+                return "", []
+
             # 1단계: 압축 해제
             try:
                 decompressed = zlib.decompress(data, -15)
@@ -695,13 +748,27 @@ class BodyTextDirectParser(IHWPParsingStrategy):
                     # 압축되지 않은 데이터
                     decompressed = data
 
+            # v3.3: 압축 해제 후 크기 체크
+            if len(decompressed) > MAX_DECOMPRESSED_SIZE:
+                logger.warning(f"Decompressed data too large: {len(decompressed)} bytes")
+                del decompressed
+                gc.collect()
+                return "", []
+
             # 2단계: HWP 레코드 파싱 (HWPTAG_PARA_TEXT만 추출)
             # 이 함수는 바이너리 노이즈 없이 순수 텍스트만 추출합니다
             extracted_text = extract_clean_text_from_hwp_data(decompressed)
 
+            # v3.3: 대용량 객체 즉시 해제
+            del decompressed
+            decompressed = None
+
             if extracted_text:
                 # 3단계: 추가 텍스트 정제
                 cleaned_text = clean_hwp_text(extracted_text)
+
+                # v3.3: 중간 객체 해제
+                del extracted_text
 
                 if cleaned_text:
                     text_parts = [cleaned_text]
@@ -711,6 +778,11 @@ class BodyTextDirectParser(IHWPParsingStrategy):
 
         except Exception as e:
             logger.debug(f"Error parsing BodyText stream: {e}")
+        finally:
+            # v3.3: 명시적 메모리 정리
+            if decompressed is not None:
+                del decompressed
+            gc.collect()
 
         return "\n".join(text_parts), paragraphs
 
@@ -767,23 +839,42 @@ class EnhancedPrvTextStrategy(IHWPParsingStrategy):
         return None
     
     def _extract_with_olefile(self, file_path: str) -> Optional[str]:
-        """Extract PrvText using olefile."""
+        """Extract PrvText using olefile.
+
+        v3.3: 메모리 최적화 - 명시적 리소스 해제
+        """
+        ole = None
+        data = None
+        result_text = None
         try:
-            with olefile.OleFileIO(file_path) as ole:
-                if ole.exists('PrvText'):
-                    stream = ole.openstream('PrvText')
-                    data = stream.read()
-                    # Try various encodings
-                    for encoding in ['utf-16le', 'utf-8', 'cp949', 'euc-kr']:
-                        try:
-                            text = data.decode(encoding, errors='ignore')
-                            if text and len(text) > 100:
-                                return text
-                        except:
-                            continue
-        except:
-            pass
-        return None
+            ole = olefile.OleFileIO(file_path)
+            if ole.exists('PrvText'):
+                stream = ole.openstream('PrvText')
+                data = stream.read()
+                stream.close()  # v3.3: 명시적 스트림 닫기
+
+                # Try various encodings
+                for encoding in ['utf-16le', 'utf-8', 'cp949', 'euc-kr']:
+                    try:
+                        text = data.decode(encoding, errors='ignore')
+                        if text and len(text) > 100:
+                            result_text = text
+                            break
+                    except:
+                        continue
+        except Exception as e:
+            logger.debug(f"olefile extraction error: {e}")
+        finally:
+            # v3.3: 명시적 정리
+            if data is not None:
+                del data
+            if ole is not None:
+                try:
+                    ole.close()
+                except:
+                    pass
+            gc.collect()
+        return result_text
 
 
 class EnhancedHWPParser:
@@ -871,6 +962,9 @@ class EnhancedHWPParser:
                                         prvtext_result["parsing_method"] = "prvtext_smart_fallback"
                                         prvtext_result["bodytext_korean_ratio"] = korean_ratio
                                         prvtext_result["prvtext_korean_ratio"] = prvtext_korean_ratio
+
+                                        # v3.3: GC 호출
+                                        gc.collect()
                                         return prvtext_result
 
                             # 정제된 텍스트가 비어있으면 다음 전략 시도
@@ -900,6 +994,9 @@ class EnhancedHWPParser:
                                       cleaned_length=len(cleaned_text),
                                       korean_ratio=f"{korean_ratio:.1%}",
                                       method=result.get("parsing_method"))
+
+                            # v3.3: 성공 후 GC 호출
+                            gc.collect()
                             return result
                         else:
                             logger.warning(f"{strategy.__class__.__name__} produced insufficient text ({text_length} chars), trying next strategy")
@@ -910,6 +1007,10 @@ class EnhancedHWPParser:
 
         # If all strategies failed, return minimal result
         logger.error("All parsing strategies failed", errors=errors)
+
+        # v3.3: 최종 GC 호출
+        gc.collect()
+
         return {
             "text": "",
             "paragraphs": [],

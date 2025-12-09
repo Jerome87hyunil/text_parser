@@ -12,8 +12,9 @@ import aiofiles
 import json
 
 from app.core.config import get_settings
-from app.services.hwp_parser import HWPParser
+from app.services.hwp_parser import get_parser  # v1.1: 싱글톤 사용
 from app.services.text_extractor import TextExtractor
+import gc  # v3.3: 메모리 관리
 from app.models.extract import ExtractRequest, ExtractResponse, ExtractFormat, ExtractedContent
 from app.core.cache import cache_manager
 from app.api.v1.endpoints.metrics import track_extraction, track_extraction_duration
@@ -138,10 +139,10 @@ async def extract_hwp_to_json(
                          warnings=validation_result["warnings"],
                          filename=file.filename)
         
-        # Initialize parser and extractor
-        parser = HWPParser()
+        # Initialize parser and extractor (v1.1: 싱글톤 사용)
+        parser = get_parser()
         extractor = TextExtractor()
-        
+
         # Parse file
         logger.info("Extracting content from file", filename=file.filename)
         parsed_content = parser.parse(temp_file_path)
@@ -194,6 +195,8 @@ async def extract_hwp_to_json(
         # Cleanup
         if temp_file_path and os.path.exists(temp_file_path):
             os.unlink(temp_file_path)
+        # v3.3: 요청 후 GC 호출
+        gc.collect()
 
 
 @router.post("/hwp-to-text",
@@ -267,9 +270,9 @@ async def extract_hwp_to_text(
                          warnings=validation_result["warnings"],
                          filename=file.filename)
         
-        # Initialize parser
-        parser = HWPParser()
-        
+        # Initialize parser (v1.1: 싱글톤 사용)
+        parser = get_parser()
+
         # Extract text
         logger.info("Extracting text from HWP", filename=file.filename)
         text_content = parser.extract_text(temp_file_path)
@@ -301,6 +304,8 @@ async def extract_hwp_to_text(
         # Cleanup
         if temp_file_path and os.path.exists(temp_file_path):
             os.unlink(temp_file_path)
+        # v3.3: 요청 후 GC 호출
+        gc.collect()
 
 
 @router.post("/hwp-to-markdown",
@@ -375,10 +380,10 @@ async def extract_hwp_to_markdown(
                          warnings=validation_result["warnings"],
                          filename=file.filename)
         
-        # Initialize parser and extractor
-        parser = HWPParser()
+        # Initialize parser and extractor (v1.1: 싱글톤 사용)
+        parser = get_parser()
         extractor = TextExtractor()
-        
+
         # Parse HWP file
         logger.info("Extracting content for markdown", filename=file.filename)
         parsed_content = parser.parse(temp_file_path)
@@ -406,8 +411,10 @@ async def extract_hwp_to_markdown(
     except Exception as e:
         logger.error("Failed to create markdown", error=str(e), filename=file.filename)
         raise HTTPException(status_code=500, detail=f"Markdown creation failed: {str(e)}")
-    
+
     finally:
         # Cleanup
         if temp_file_path and os.path.exists(temp_file_path):
             os.unlink(temp_file_path)
+        # v3.3: 요청 후 GC 호출
+        gc.collect()
