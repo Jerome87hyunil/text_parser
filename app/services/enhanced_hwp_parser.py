@@ -6,6 +6,8 @@ v2.0: 노이즈 문자 제거, 텍스트 정제 파이프라인 강화
 v3.0: HWP 레코드 파싱 완전 재작성 - HWPTAG_PARA_TEXT(0x42)에서만 텍스트 추출
       바이너리 노이즈(CJK, Cyrillic 등) 완전 제거
 v3.1: ASCII 반복 패턴 노이즈 제거 (LLLLLL, KKKKKK 등)
+v3.2: 스마트 폴백 - BodyText 한글 비율 낮으면 PrvText로 자동 전환
+      특정 HWP 파일에서 PARA_TEXT 추출 실패 시 PrvText 우선 사용
 """
 import os
 import re
@@ -786,7 +788,10 @@ class EnhancedPrvTextStrategy(IHWPParsingStrategy):
 
 class EnhancedHWPParser:
     """Enhanced HWP parser with multiple strategies and fallback mechanisms."""
-    
+
+    # v3.2: 스마트 폴백을 위한 최소 한글 비율 임계값
+    MIN_KOREAN_RATIO_FOR_BODYTEXT = 0.10  # 10% 미만이면 PrvText로 폴백
+
     def __init__(self):
         """Initialize parser with all available strategies."""
         # Order strategies by effectiveness and completeness
@@ -796,7 +801,9 @@ class EnhancedHWPParser:
             HWP5PythonAPIStrategy(),     # When properly configured
             EnhancedPrvTextStrategy()    # Last resort (only ~1000 chars)
         ]
-        logger.info("EnhancedHWPParser initialized", 
+        # PrvText 전용 전략 (스마트 폴백용)
+        self.prvtext_strategy = EnhancedPrvTextStrategy()
+        logger.info("EnhancedHWPParser initialized",
                    strategy_count=len(self.strategies))
     
     def parse(self, file_path: str) -> Dict[str, Any]:
@@ -804,6 +811,7 @@ class EnhancedHWPParser:
         Parse HWP file using available strategies in order.
 
         v2.0: 텍스트 정제 파이프라인 추가
+        v3.2: 스마트 폴백 - BodyText 한글 비율 검증 후 PrvText 우선 사용
 
         Args:
             file_path: Path to HWP file
@@ -832,9 +840,52 @@ class EnhancedHWPParser:
                         if text_length > 500:
                             # v2.0: 텍스트 정제 적용
                             cleaned_text = clean_hwp_text(text)
+
+                            # v3.2: 스마트 폴백 - 한글 비율 검증
+                            korean_ratio = calculate_korean_ratio(cleaned_text)
+
+                            # BodyText 추출 결과가 한글 비율이 너무 낮으면 PrvText 시도
+                            if (isinstance(strategy, BodyTextDirectParser) and
+                                korean_ratio < self.MIN_KOREAN_RATIO_FOR_BODYTEXT):
+
+                                logger.warning(
+                                    f"BodyText Korean ratio too low ({korean_ratio:.1%}), "
+                                    f"trying PrvText fallback",
+                                    cleaned_length=len(cleaned_text)
+                                )
+
+                                # PrvText 추출 시도
+                                prvtext_result = self._try_prvtext_fallback(file_path)
+                                if prvtext_result:
+                                    prvtext_korean_ratio = calculate_korean_ratio(
+                                        prvtext_result.get("text", "")
+                                    )
+
+                                    # PrvText가 더 나은 한글 비율을 가지면 사용
+                                    if prvtext_korean_ratio > korean_ratio:
+                                        logger.info(
+                                            f"Using PrvText fallback "
+                                            f"(Korean ratio: {prvtext_korean_ratio:.1%} > {korean_ratio:.1%})",
+                                            prvtext_length=len(prvtext_result.get("text", ""))
+                                        )
+                                        prvtext_result["parsing_method"] = "prvtext_smart_fallback"
+                                        prvtext_result["bodytext_korean_ratio"] = korean_ratio
+                                        prvtext_result["prvtext_korean_ratio"] = prvtext_korean_ratio
+                                        return prvtext_result
+
+                            # 정제된 텍스트가 비어있으면 다음 전략 시도
+                            if not cleaned_text or len(cleaned_text) < 100:
+                                logger.warning(
+                                    f"{strategy.__class__.__name__} text cleaned to "
+                                    f"insufficient length ({len(cleaned_text)} chars), "
+                                    f"trying next strategy"
+                                )
+                                continue
+
                             result["text"] = cleaned_text
                             result["original_length"] = text_length
                             result["cleaned_length"] = len(cleaned_text)
+                            result["korean_ratio"] = korean_ratio
 
                             # 단락도 정제
                             if result.get("paragraphs"):
@@ -847,6 +898,7 @@ class EnhancedHWPParser:
                             logger.info(f"Successfully parsed with {strategy.__class__.__name__}",
                                       original_length=text_length,
                                       cleaned_length=len(cleaned_text),
+                                      korean_ratio=f"{korean_ratio:.1%}",
                                       method=result.get("parsing_method"))
                             return result
                         else:
@@ -866,6 +918,34 @@ class EnhancedHWPParser:
             "errors": errors,
             "parsing_method": "failed"
         }
+
+    def _try_prvtext_fallback(self, file_path: str) -> Optional[Dict[str, Any]]:
+        """PrvText 스마트 폴백 시도
+
+        v3.2: BodyText 추출 실패 시 PrvText로 폴백
+
+        Args:
+            file_path: HWP 파일 경로
+
+        Returns:
+            PrvText 추출 결과 또는 None
+        """
+        try:
+            if self.prvtext_strategy.can_parse(file_path):
+                result = self.prvtext_strategy.parse(file_path)
+                if result and result.get("text"):
+                    text = result.get("text", "")
+                    if len(text) > 100:
+                        # 정제 적용
+                        cleaned = clean_hwp_text(text)
+                        if cleaned and len(cleaned) > 50:
+                            result["text"] = cleaned
+                            result["original_length"] = len(text)
+                            result["cleaned_length"] = len(cleaned)
+                            return result
+        except Exception as e:
+            logger.debug(f"PrvText fallback failed: {e}")
+        return None
     
     def _is_valid_result(self, text: str) -> bool:
         """
