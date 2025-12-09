@@ -2,11 +2,12 @@
 HWPX Parser implementation.
 HWPX is the new XML-based format for HWP files.
 개선된 버전: 정확한 네임스페이스 처리 및 텍스트 추출
+v2.0: hp10 네임스페이스 지원, 텍스트 정제 개선, 테이블 추출 강화
 """
 import structlog
 import zipfile
 import xml.etree.ElementTree as ET
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Set
 import os
 import re
 
@@ -16,7 +17,7 @@ logger = structlog.get_logger()
 class HWPXParser:
     """Parser for HWPX (XML-based HWP) files."""
 
-    # HWPX 네임스페이스 정의
+    # HWPX 네임스페이스 정의 (2011/2016 버전 모두 지원)
     NAMESPACES = {
         'hp': 'http://www.hancom.co.kr/hwpml/2011/paragraph',
         'hp10': 'http://www.hancom.co.kr/hwpml/2016/paragraph',
@@ -27,6 +28,12 @@ class HWPXParser:
         'hm': 'http://www.hancom.co.kr/hwpml/2011/master-page',
         'hpf': 'http://www.hancom.co.kr/schema/2011/hpf',
         'dc': 'http://purl.org/dc/elements/1.1/',
+    }
+
+    # 텍스트를 추출할 네임스페이스 URI 목록
+    TEXT_NS_URIS: Set[str] = {
+        'http://www.hancom.co.kr/hwpml/2011/paragraph',
+        'http://www.hancom.co.kr/hwpml/2016/paragraph',
     }
 
     def __init__(self):
@@ -137,10 +144,42 @@ class HWPXParser:
                         text = content.decode('utf-8')
                     except UnicodeDecodeError:
                         text = content.decode('euc-kr', errors='ignore')
-                    return text.strip()
+                    # 텍스트 정제
+                    cleaned = self._clean_preview_text(text)
+                    return cleaned
         except Exception as e:
             logger.debug("Preview 텍스트 추출 실패", error=str(e))
         return ""
+
+    def _clean_preview_text(self, text: str) -> str:
+        """Preview 텍스트 정제 (구분자 제거, 포맷 정리)
+
+        v2.0: 더 정교한 <> 구분자 처리
+        """
+        if not text:
+            return ""
+
+        # <구분자> 형식 처리
+        # 먼저 ><를 줄바꿈으로 변환
+        cleaned = re.sub(r'>\s*<', '\n', text)
+
+        # 남은 < 와 > 모두 제거
+        cleaned = re.sub(r'[<>]', '', cleaned)
+
+        # 연속 공백 정리
+        cleaned = re.sub(r'[ \t]+', ' ', cleaned)
+
+        # 각 줄 앞뒤 공백 제거
+        lines = [line.strip() for line in cleaned.split('\n')]
+        cleaned = '\n'.join(lines)
+
+        # 연속 줄바꿈 정리 (3개 이상 → 2개)
+        cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
+
+        # 빈 줄 제거 (연속 줄바꿈만 제거하지 않고 빈 줄도 정리)
+        cleaned = re.sub(r'\n\s*\n', '\n', cleaned)
+
+        return cleaned.strip()
 
     def _extract_metadata(self, zip_file: zipfile.ZipFile) -> Dict[str, Any]:
         """Extract metadata from HWPX file."""
@@ -201,7 +240,7 @@ class HWPXParser:
         섹션에서 모든 텍스트 추출 (개선된 방식).
 
         HWPX 구조:
-        - <hp:p> (paragraph)
+        - <hp:p> 또는 <hp10:p> (paragraph)
           - <hp:run> (text run)
             - <hp:t> (text content)
         - <hp:tbl> (table)
@@ -209,14 +248,12 @@ class HWPXParser:
             - <hp:tc> (table cell)
               - <hp:subList>
                 - <hp:p> (paragraph in cell)
+
+        v2.0: hp10 네임스페이스 (2016) 지원 추가
         """
         texts = []
 
-        # 네임스페이스 URI 가져오기
-        hp_ns = self.NAMESPACES['hp']
-
-        # 모든 <hp:t> (텍스트) 요소에서 직접 텍스트 추출
-        # 이 방식이 가장 정확함
+        # 모든 <hp:t> 또는 <hp10:t> (텍스트) 요소에서 직접 텍스트 추출
         for elem in section_root.iter():
             tag = elem.tag
 
@@ -226,19 +263,38 @@ class HWPXParser:
                 ns_uri = tag[1:ns_end]
                 local_name = tag[ns_end + 1:]
 
-                # hp 네임스페이스의 't' 요소 (텍스트)
-                if local_name == 't' and ns_uri == hp_ns:
+                # hp 또는 hp10 네임스페이스의 't' 요소 (텍스트)
+                if local_name == 't' and ns_uri in self.TEXT_NS_URIS:
                     if elem.text and elem.text.strip():
-                        texts.append(elem.text.strip())
+                        # 노이즈 문자 정제
+                        cleaned = self._clean_text_content(elem.text.strip())
+                        if cleaned:
+                            texts.append(cleaned)
 
         return texts
 
-    def _extract_paragraphs_from_section(self, section_root: ET.Element) -> List[Dict[str, Any]]:
-        """Extract paragraphs from a section element (구조 보존)."""
-        paragraphs = []
-        hp_ns = self.NAMESPACES['hp']
+    def _clean_text_content(self, text: str) -> str:
+        """텍스트 콘텐츠 정제 (노이즈 문자 제거)"""
+        if not text:
+            return ""
 
-        # hp:p 요소만 찾기 (최상위 단락만)
+        # 제어 문자 및 특수 노이즈 제거 (한글/영어/숫자/기본 문장부호 유지)
+        # 특수 노이즈 패턴: ​ (ZWSP), ‌ (ZWNJ) 등
+        cleaned = re.sub(r'[\u200b\u200c\u200d\ufeff]', '', text)
+
+        # 연속 공백 정리
+        cleaned = re.sub(r'\s+', ' ', cleaned)
+
+        return cleaned.strip()
+
+    def _extract_paragraphs_from_section(self, section_root: ET.Element) -> List[Dict[str, Any]]:
+        """Extract paragraphs from a section element (구조 보존).
+
+        v2.0: hp10 네임스페이스 지원 추가
+        """
+        paragraphs = []
+
+        # hp:p 또는 hp10:p 요소 찾기
         for elem in section_root.iter():
             tag = elem.tag
 
@@ -247,21 +303,23 @@ class HWPXParser:
                 ns_uri = tag[1:ns_end]
                 local_name = tag[ns_end + 1:]
 
-                # hp 네임스페이스의 'p' 요소 (paragraph)
-                if local_name == 'p' and ns_uri == hp_ns:
+                # hp 또는 hp10 네임스페이스의 'p' 요소 (paragraph)
+                if local_name == 'p' and ns_uri in self.TEXT_NS_URIS:
                     para_text = self._extract_text_from_paragraph(elem)
                     if para_text.strip():
                         paragraphs.append({
-                            "text": para_text.strip(),
+                            "text": self._clean_text_content(para_text.strip()),
                             "style": self._extract_style_from_element(elem)
                         })
 
         return paragraphs
 
     def _extract_text_from_paragraph(self, para_elem: ET.Element) -> str:
-        """단락 요소에서 텍스트 추출 (hp:run/hp:t 구조 처리)."""
+        """단락 요소에서 텍스트 추출 (hp:run/hp:t 또는 hp10:run/hp10:t 구조 처리).
+
+        v2.0: hp10 네임스페이스 지원 추가
+        """
         texts = []
-        hp_ns = self.NAMESPACES['hp']
 
         for elem in para_elem.iter():
             tag = elem.tag
@@ -271,17 +329,19 @@ class HWPXParser:
                 ns_uri = tag[1:ns_end]
                 local_name = tag[ns_end + 1:]
 
-                # hp:t 요소의 텍스트 추출
-                if local_name == 't' and ns_uri == hp_ns:
+                # hp:t 또는 hp10:t 요소의 텍스트 추출
+                if local_name == 't' and ns_uri in self.TEXT_NS_URIS:
                     if elem.text:
                         texts.append(elem.text)
 
         return ''.join(texts)
 
     def _extract_tables_from_section(self, section_root: ET.Element) -> List[Dict[str, Any]]:
-        """Extract tables from a section element."""
+        """Extract tables from a section element.
+
+        v2.0: hp10 네임스페이스 지원 추가
+        """
         tables = []
-        hp_ns = self.NAMESPACES['hp']
 
         for elem in section_root.iter():
             tag = elem.tag
@@ -291,8 +351,8 @@ class HWPXParser:
                 ns_uri = tag[1:ns_end]
                 local_name = tag[ns_end + 1:]
 
-                # hp:tbl 요소 (table)
-                if local_name == 'tbl' and ns_uri == hp_ns:
+                # hp:tbl 또는 hp10:tbl 요소 (table)
+                if local_name == 'tbl' and ns_uri in self.TEXT_NS_URIS:
                     table_data = self._parse_table_element(elem)
                     if table_data:
                         tables.append(table_data)
@@ -315,13 +375,14 @@ class HWPXParser:
         return style
 
     def _parse_table_element(self, table_elem: ET.Element) -> Optional[Dict[str, Any]]:
-        """Parse a table element and extract its data."""
-        hp_ns = self.NAMESPACES['hp']
+        """Parse a table element and extract its data.
 
+        v2.0: hp10 네임스페이스 지원 추가
+        """
         try:
             rows = []
 
-            # hp:tr (table row) 요소 찾기
+            # hp:tr 또는 hp10:tr (table row) 요소 찾기
             for elem in table_elem.iter():
                 tag = elem.tag
 
@@ -332,11 +393,11 @@ class HWPXParser:
                 ns_uri = tag[1:ns_end]
                 local_name = tag[ns_end + 1:]
 
-                # hp:tr 요소 (table row)
-                if local_name == 'tr' and ns_uri == hp_ns:
+                # hp:tr 또는 hp10:tr 요소 (table row)
+                if local_name == 'tr' and ns_uri in self.TEXT_NS_URIS:
                     cells = []
 
-                    # hp:tc (table cell) 요소 찾기
+                    # hp:tc 또는 hp10:tc (table cell) 요소 찾기
                     for cell_elem in elem.iter():
                         cell_tag = cell_elem.tag
 
@@ -347,10 +408,11 @@ class HWPXParser:
                         cell_ns_uri = cell_tag[1:cell_ns_end]
                         cell_local_name = cell_tag[cell_ns_end + 1:]
 
-                        # hp:tc 요소
-                        if cell_local_name == 'tc' and cell_ns_uri == hp_ns:
+                        # hp:tc 또는 hp10:tc 요소
+                        if cell_local_name == 'tc' and cell_ns_uri in self.TEXT_NS_URIS:
                             cell_text = self._extract_text_from_cell(cell_elem)
-                            cells.append(cell_text)
+                            cleaned = self._clean_text_content(cell_text)
+                            cells.append(cleaned)
 
                     if cells:
                         rows.append(cells)
@@ -368,9 +430,11 @@ class HWPXParser:
         return None
 
     def _extract_text_from_cell(self, cell_elem: ET.Element) -> str:
-        """테이블 셀에서 텍스트 추출."""
+        """테이블 셀에서 텍스트 추출.
+
+        v2.0: hp10 네임스페이스 지원 추가
+        """
         texts = []
-        hp_ns = self.NAMESPACES['hp']
 
         for elem in cell_elem.iter():
             tag = elem.tag
@@ -380,8 +444,8 @@ class HWPXParser:
                 ns_uri = tag[1:ns_end]
                 local_name = tag[ns_end + 1:]
 
-                # hp:t 요소의 텍스트 추출
-                if local_name == 't' and ns_uri == hp_ns:
+                # hp:t 또는 hp10:t 요소의 텍스트 추출
+                if local_name == 't' and ns_uri in self.TEXT_NS_URIS:
                     if elem.text:
                         texts.append(elem.text)
 

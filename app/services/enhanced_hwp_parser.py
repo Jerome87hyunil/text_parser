@@ -1,19 +1,87 @@
 """
 Enhanced HWP Parser with complete text extraction capabilities.
 Implements multiple parsing strategies with fallback mechanisms.
+
+v2.0: 노이즈 문자 제거, 텍스트 정제 파이프라인 강화
 """
 import os
+import re
 import zlib
 import struct
 import subprocess
 import tempfile
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Set
 from pathlib import Path
 import structlog
 import olefile
 
 logger = structlog.get_logger()
+
+# 노이즈 문자 패턴 정의 (HWP에서 자주 발생하는 인코딩 깨짐)
+NOISE_CHARS: Set[str] = {
+    'ࡂ', 'ृ', 'ƀ', 'ą', '褀', '褅', '耈', '蠂',  # 문서에서 언급된 패턴
+    '\x00', '\x01', '\x02', '\x03', '\x04', '\x05',  # 제어 문자
+    '\u200b', '\u200c', '\u200d', '\ufeff',  # 제로폭 문자
+}
+
+# 유효한 한글/영문/숫자/기본문장부호 유니코드 범위
+VALID_CHAR_RANGES = [
+    (0x0020, 0x007E),  # ASCII 문자
+    (0x00A0, 0x00FF),  # Latin-1 Supplement
+    (0xAC00, 0xD7A3),  # 한글 음절
+    (0x1100, 0x11FF),  # 한글 자모
+    (0x3130, 0x318F),  # 한글 호환 자모
+    (0x3000, 0x303F),  # CJK 기호 및 문장 부호
+    (0xFF00, 0xFFEF),  # 반각 및 전각 형태
+]
+
+
+def is_valid_char(c: str) -> bool:
+    """문자가 유효한 범위인지 확인"""
+    code = ord(c)
+    for start, end in VALID_CHAR_RANGES:
+        if start <= code <= end:
+            return True
+    return False
+
+
+def clean_hwp_text(text: str) -> str:
+    """HWP 텍스트에서 노이즈 문자 제거 및 정제
+
+    Args:
+        text: 추출된 원본 텍스트
+
+    Returns:
+        정제된 텍스트
+    """
+    if not text:
+        return ""
+
+    # 노이즈 문자 집합 제거
+    for noise_char in NOISE_CHARS:
+        text = text.replace(noise_char, '')
+
+    # 유효하지 않은 문자 필터링 (한글, 영어, 숫자, 기본 문장부호만 유지)
+    cleaned_chars = []
+    for c in text:
+        if is_valid_char(c) or c in '\n\r\t':
+            cleaned_chars.append(c)
+        # 일부 유효하지 않은 문자는 공백으로 대체
+        elif ord(c) >= 32:
+            # 스킵하지 않고 일단 유지 (너무 많이 제거하면 정보 손실)
+            cleaned_chars.append(c)
+
+    result = ''.join(cleaned_chars)
+
+    # 연속 공백 정리
+    result = re.sub(r'[ \t]+', ' ', result)
+    # 연속 줄바꿈 정리 (3개 이상 → 2개)
+    result = re.sub(r'\n{3,}', '\n\n', result)
+    # 앞뒤 공백 제거
+    result = result.strip()
+
+    return result
 
 
 class IHWPParsingStrategy(ABC):
@@ -444,34 +512,51 @@ class EnhancedHWPParser:
     def parse(self, file_path: str) -> Dict[str, Any]:
         """
         Parse HWP file using available strategies in order.
-        
+
+        v2.0: 텍스트 정제 파이프라인 추가
+
         Args:
             file_path: Path to HWP file
-            
+
         Returns:
             Dict containing extracted content
         """
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"File not found: {file_path}")
-        
+
         errors = []
-        
+
         # Try each strategy in order
         for strategy in self.strategies:
             try:
                 if strategy.can_parse(file_path):
-                    logger.info(f"Trying {strategy.__class__.__name__}", 
+                    logger.info(f"Trying {strategy.__class__.__name__}",
                               file=file_path)
                     result = strategy.parse(file_path)
                     if result and result.get("text"):
                         text = result.get("text", "")
                         text_length = len(text)
-                        
+
                         # For AI analysis, prioritize text volume over quality
                         # Accept any result with substantial text (>500 chars)
                         if text_length > 500:
-                            logger.info(f"Successfully parsed with {strategy.__class__.__name__}", 
-                                      text_length=text_length,
+                            # v2.0: 텍스트 정제 적용
+                            cleaned_text = clean_hwp_text(text)
+                            result["text"] = cleaned_text
+                            result["original_length"] = text_length
+                            result["cleaned_length"] = len(cleaned_text)
+
+                            # 단락도 정제
+                            if result.get("paragraphs"):
+                                result["paragraphs"] = [
+                                    {"text": clean_hwp_text(p.get("text", "")), **{k: v for k, v in p.items() if k != "text"}}
+                                    if isinstance(p, dict) else {"text": clean_hwp_text(str(p))}
+                                    for p in result["paragraphs"]
+                                ]
+
+                            logger.info(f"Successfully parsed with {strategy.__class__.__name__}",
+                                      original_length=text_length,
+                                      cleaned_length=len(cleaned_text),
                                       method=result.get("parsing_method"))
                             return result
                         else:
@@ -480,7 +565,7 @@ class EnhancedHWPParser:
                 error_msg = f"{strategy.__class__.__name__} failed: {str(e)}"
                 errors.append(error_msg)
                 logger.warning(error_msg)
-        
+
         # If all strategies failed, return minimal result
         logger.error("All parsing strategies failed", errors=errors)
         return {
