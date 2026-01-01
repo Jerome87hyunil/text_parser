@@ -57,7 +57,10 @@ class PDFParser:
         return result
     
     def _parse_with_pymupdf(self, file_path: str) -> Dict[str, Any]:
-        """Parse PDF using PyMuPDF (fitz)."""
+        """Parse PDF using PyMuPDF (fitz).
+
+        v1.1: 메모리 누수 방지를 위해 try/finally 추가
+        """
         result = {
             "paragraphs": [],
             "tables": [],
@@ -69,12 +72,13 @@ class PDFParser:
                 "total_pages": 0
             }
         }
-        
+
+        doc = None
         try:
             # Open PDF
             doc = fitz.open(file_path)
             result["structure"]["total_pages"] = len(doc)
-            
+
             # Extract metadata
             metadata = doc.metadata
             if metadata:
@@ -88,17 +92,17 @@ class PDFParser:
                     "created_date": str(metadata.get("creationDate", "")),
                     "modified_date": str(metadata.get("modDate", "")),
                 }
-            
+
             # Extract text from each page
             all_text = []
             paragraphs = []
-            
+
             for page_num, page in enumerate(doc):
                 # Extract text
                 text = page.get_text()
                 if text.strip():
                     all_text.append(text)
-                    
+
                     # Split into paragraphs
                     page_paragraphs = self._split_into_paragraphs(text)
                     for para in page_paragraphs:
@@ -108,23 +112,28 @@ class PDFParser:
                                 "page": page_num + 1,
                                 "style": {}
                             })
-                
+
                 # Add page info to structure
                 result["structure"]["sections"].append({
                     "page": page_num + 1,
                     "text_length": len(text),
                     "paragraph_count": len(page_paragraphs)
                 })
-            
+
             result["text"] = "\n\n".join(all_text)
             result["paragraphs"] = paragraphs
-            
-            doc.close()
-            
+
         except Exception as e:
             logger.error("Error parsing PDF with PyMuPDF", error=str(e))
             raise
-        
+        finally:
+            # 메모리 누수 방지: 항상 문서 닫기
+            if doc is not None:
+                try:
+                    doc.close()
+                except:
+                    pass
+
         return result
     
     def _parse_with_pdfplumber(self, file_path: str) -> Dict[str, Any]:

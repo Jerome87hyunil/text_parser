@@ -58,13 +58,18 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Cache connection failed: {e}, continuing without cache")
     
-    # Skip memory monitoring for now to simplify startup
-    # memory_task = asyncio.create_task(memory_manager.monitor_memory_async())
-    
+    # 메모리 모니터링 활성화 (Railway 환경에서 OOM 방지)
+    memory_task = asyncio.create_task(memory_manager.monitor_memory_async())
+    logger.info("Memory monitoring started")
+
     yield
-    
+
     # Shutdown
-    # memory_task.cancel()
+    memory_task.cancel()
+    try:
+        await memory_task
+    except asyncio.CancelledError:
+        pass
     try:
         await cache_manager.disconnect()
     except:

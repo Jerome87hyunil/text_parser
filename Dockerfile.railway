@@ -1,0 +1,74 @@
+# Railway Optimized Dockerfile for HWP Parser API
+# 메모리 최적화: 단일 워커, 저메모리 설정
+ARG PYTHON_VERSION=3.11
+FROM python:${PYTHON_VERSION}-slim
+
+# 메모리 최적화 환경 변수
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONMALLOC=malloc \
+    MALLOC_TRIM_THRESHOLD_=100000 \
+    DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    # 메모리 제한 설정
+    MAX_FILE_SIZE=10485760 \
+    MAX_MEMORY_SIZE=5242880 \
+    # 단일 워커 (메모리 안정성)
+    WORKERS=1 \
+    # Uvicorn 설정
+    WEB_CONCURRENCY=1 \
+    UVICORN_WORKERS=1
+
+# 시스템 의존성 설치 (최소화)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # Build dependencies
+    gcc \
+    g++ \
+    # PostgreSQL client (선택적)
+    libpq-dev \
+    # PDF processing
+    poppler-utils \
+    # HWP processing
+    libxml2-dev \
+    libxslt1-dev \
+    # Health check
+    curl \
+    # Clean up
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean \
+    && rm -rf /tmp/*
+
+# 앱 사용자 생성
+RUN groupadd -r appuser && useradd -r -g appuser appuser \
+    && mkdir -p /app /app/uploads /app/temp \
+    && chown -R appuser:appuser /app
+
+WORKDIR /app
+
+# 의존성 먼저 복사 (캐싱 최적화)
+COPY requirements.txt .
+
+# Python 의존성 설치
+RUN pip install --upgrade pip setuptools wheel \
+    && pip install -r requirements.txt \
+    && pip install gunicorn uvloop httptools \
+    # 캐시 정리
+    && rm -rf ~/.cache/pip/*
+
+# 애플리케이션 코드 복사
+COPY --chown=appuser:appuser . .
+
+# non-root 사용자로 전환
+USER appuser
+
+# Railway는 PORT 환경변수를 자동 설정
+# 기본값 8000
+EXPOSE 8000
+
+# 헬스체크
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:${PORT:-8000}/health || exit 1
+
+# 시작 명령어 - 단일 워커로 메모리 안정화
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1 --limit-concurrency 10 --timeout-keep-alive 30"]

@@ -1,0 +1,28 @@
+# Railway Deployment Configuration for HWP Parser API
+# 문서 파싱 서버 (HWP, HWPX, PDF)
+
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile.railway"
+
+[deploy]
+# 단일 인스턴스 (스케일링은 Railway에서 자동 관리)
+numReplicas = 1
+
+# 헬스체크
+healthcheckPath = "/health"
+healthcheckTimeout = 30
+
+# 재시작 정책
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
+
+# 환경 변수 (Railway Dashboard에서 설정)
+# Required:
+#   - PORT (Railway가 자동 설정)
+#   - SECRET_KEY
+#   - JWT_SECRET_KEY
+#
+# Optional:
+#   - REDIS_URL (캐싱 활성화 시)
+#   - DATABASE_URL (DB 사용 시)
