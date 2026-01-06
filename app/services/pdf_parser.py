@@ -100,6 +100,8 @@ class PDFParser:
             for page_num, page in enumerate(doc):
                 # Extract text
                 text = page.get_text()
+                page_paragraphs = []  # 빈 페이지 처리를 위해 초기화
+
                 if text.strip():
                     all_text.append(text)
 
@@ -175,9 +177,11 @@ class PDFParser:
                 for page_num, page in enumerate(pdf.pages):
                     # Extract text
                     text = page.extract_text()
+                    page_paragraphs = []  # 빈 페이지 처리를 위해 초기화
+
                     if text:
                         all_text.append(text)
-                        
+
                         # Split into paragraphs
                         page_paragraphs = self._split_into_paragraphs(text)
                         for para in page_paragraphs:
