@@ -229,6 +229,7 @@ class TextExtractor:
                 current_list["items"].append({
                     "text": list_pattern.sub('', text).strip(),
                     "level": self._detect_list_level(text),
+                    "index": len(current_list["items"]),
                     "original": text
                 })
             else:
