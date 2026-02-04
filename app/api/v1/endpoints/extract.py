@@ -14,7 +14,8 @@ import json
 from app.core.config import get_settings
 from app.services.hwp_parser import get_parser  # v1.1: 싱글톤 사용
 from app.services.text_extractor import TextExtractor
-import gc  # v3.3: 메모리 관리
+# v4.0: gc.collect() 매 요청마다 호출 제거 - 메모리 누수 방지
+# 가비지 컬렉션은 memory_manager에서 주기적으로 처리
 from app.models.extract import ExtractRequest, ExtractResponse, ExtractFormat, ExtractedContent
 from app.core.cache import cache_manager
 from app.api.v1.endpoints.metrics import track_extraction, track_extraction_duration
@@ -195,8 +196,7 @@ async def extract_hwp_to_json(
         # Cleanup
         if temp_file_path and os.path.exists(temp_file_path):
             os.unlink(temp_file_path)
-        # v3.3: 요청 후 GC 호출
-        gc.collect()
+        # v4.0: gc.collect() 제거 - memory_manager가 주기적으로 처리
 
 
 @router.post("/hwp-to-text",
@@ -304,8 +304,7 @@ async def extract_hwp_to_text(
         # Cleanup
         if temp_file_path and os.path.exists(temp_file_path):
             os.unlink(temp_file_path)
-        # v3.3: 요청 후 GC 호출
-        gc.collect()
+        # v4.0: gc.collect() 제거 - memory_manager가 주기적으로 처리
 
 
 @router.post("/hwp-to-markdown",
@@ -416,5 +415,4 @@ async def extract_hwp_to_markdown(
         # Cleanup
         if temp_file_path and os.path.exists(temp_file_path):
             os.unlink(temp_file_path)
-        # v3.3: 요청 후 GC 호출
-        gc.collect()
+        # v4.0: gc.collect() 제거 - memory_manager가 주기적으로 처리

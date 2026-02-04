@@ -9,10 +9,12 @@ v3.1: ASCII 반복 패턴 노이즈 제거 (LLLLLL, KKKKKK 등)
 v3.2: 스마트 폴백 - BodyText 한글 비율 낮으면 PrvText로 자동 전환
       특정 HWP 파일에서 PARA_TEXT 추출 실패 시 PrvText 우선 사용
 v3.3: 메모리 최적화 - 512MB RAM 환경 지원
-      - 명시적 GC 호출
       - 파일 크기 제한 (10MB)
       - 청크 단위 처리
       - 대용량 객체 명시적 해제
+v4.0: gc.collect() 최소화 - 메모리 누수 방지
+      - 매 파싱마다 gc.collect() 호출 제거
+      - memory_manager가 주기적으로 처리
 """
 import os
 import re
@@ -698,14 +700,13 @@ class BodyTextDirectParser(IHWPParsingStrategy):
             logger.warning(f"BodyText direct parser failed: {e}")
             return None
         finally:
-            # v3.3: OLE 파일 명시적 닫기 및 GC
+            # v4.0: OLE 파일 명시적 닫기 (gc.collect() 제거)
             if ole is not None:
                 try:
                     ole.close()
                 except:
                     pass
                 del ole
-            gc.collect()
     
     def _extract_metadata(self, ole) -> Dict[str, Any]:
         """Extract metadata from OLE file."""
@@ -752,7 +753,6 @@ class BodyTextDirectParser(IHWPParsingStrategy):
             if len(decompressed) > MAX_DECOMPRESSED_SIZE:
                 logger.warning(f"Decompressed data too large: {len(decompressed)} bytes")
                 del decompressed
-                gc.collect()
                 return "", []
 
             # 2단계: HWP 레코드 파싱 (HWPTAG_PARA_TEXT만 추출)
@@ -779,10 +779,9 @@ class BodyTextDirectParser(IHWPParsingStrategy):
         except Exception as e:
             logger.debug(f"Error parsing BodyText stream: {e}")
         finally:
-            # v3.3: 명시적 메모리 정리
+            # v4.0: 명시적 메모리 정리 (gc.collect() 제거)
             if decompressed is not None:
                 del decompressed
-            gc.collect()
 
         return "\n".join(text_parts), paragraphs
 
@@ -865,7 +864,7 @@ class EnhancedPrvTextStrategy(IHWPParsingStrategy):
         except Exception as e:
             logger.debug(f"olefile extraction error: {e}")
         finally:
-            # v3.3: 명시적 정리
+            # v4.0: 명시적 정리 (gc.collect() 제거)
             if data is not None:
                 del data
             if ole is not None:
@@ -873,7 +872,6 @@ class EnhancedPrvTextStrategy(IHWPParsingStrategy):
                     ole.close()
                 except:
                     pass
-            gc.collect()
         return result_text
 
 
@@ -963,8 +961,7 @@ class EnhancedHWPParser:
                                         prvtext_result["bodytext_korean_ratio"] = korean_ratio
                                         prvtext_result["prvtext_korean_ratio"] = prvtext_korean_ratio
 
-                                        # v3.3: GC 호출
-                                        gc.collect()
+                                        # v4.0: gc.collect() 제거
                                         return prvtext_result
 
                             # 정제된 텍스트가 비어있으면 다음 전략 시도
@@ -995,8 +992,7 @@ class EnhancedHWPParser:
                                       korean_ratio=f"{korean_ratio:.1%}",
                                       method=result.get("parsing_method"))
 
-                            # v3.3: 성공 후 GC 호출
-                            gc.collect()
+                            # v4.0: gc.collect() 제거
                             return result
                         else:
                             logger.warning(f"{strategy.__class__.__name__} produced insufficient text ({text_length} chars), trying next strategy")
@@ -1008,8 +1004,7 @@ class EnhancedHWPParser:
         # If all strategies failed, return minimal result
         logger.error("All parsing strategies failed", errors=errors)
 
-        # v3.3: 최종 GC 호출
-        gc.collect()
+        # v4.0: gc.collect() 제거
 
         return {
             "text": "",

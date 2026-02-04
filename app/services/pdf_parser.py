@@ -37,14 +37,12 @@ class PDFParser:
         }
         
         # Try PyMuPDF first (faster and more reliable for text)
+        # v2.0: pdfplumber 이중 파싱 제거 - 메모리 누수 방지
+        # 테이블이 필요한 경우 pdfplumber fallback에서 처리됨
         try:
             result = self._parse_with_pymupdf(file_path)
-            
-            # Try to extract tables with pdfplumber
-            tables = self._extract_tables_with_pdfplumber(file_path)
-            if tables:
-                result["tables"] = tables
-                
+            # Note: 테이블 추출이 필요하면 별도 요청으로 처리
+
         except Exception as e:
             logger.warning("PyMuPDF parsing failed, trying pdfplumber", error=str(e))
             # Fallback to pdfplumber

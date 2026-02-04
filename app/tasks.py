@@ -7,7 +7,7 @@ import structlog
 from typing import Dict, Any
 from celery import Task
 from app.core.celery_app import celery_app
-from app.services.hwp_parser import HWPParser
+from app.services.hwp_parser import get_parser  # v1.1: 싱글톤 사용
 from app.services.text_extractor import TextExtractor
 from app.core.cache import CacheManager
 
@@ -65,8 +65,8 @@ def extract_file_async(
         # Update task state
         self.update_state(state="PROCESSING", meta={"status": "Parsing file"})
         
-        # Initialize parser and extractor
-        parser = HWPParser()
+        # Initialize parser and extractor (v1.1: 싱글톤 사용으로 메모리 최적화)
+        parser = get_parser()
         extractor = TextExtractor()
         
         # Parse file
