@@ -5,6 +5,7 @@ python-multipart==0.0.9
 
 # HWP Processing
 pyhwp==0.1b15
+lxml>=5.0.0
 # Alternative: hwp5==0.1.0
 
 # PDF Generation

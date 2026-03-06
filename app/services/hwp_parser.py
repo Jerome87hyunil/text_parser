@@ -110,21 +110,47 @@ class HWPParser:
                 logger.error("PDF parser failed", error=str(e), file=file_path)
                 raise
         
-        # Regular HWP file parsing
+        # [A] HWP→HWPX conversion attempt (priority strategy)
+        try:
+            from .hwp_to_hwpx import convert_hwp_to_hwpx
+            from . import hwpx_parser as hwpx_mod
+
+            hwpx_path = convert_hwp_to_hwpx(file_path)
+            if hwpx_path:
+                try:
+                    result = hwpx_mod.parse(hwpx_path)
+                    if result.get("text") and len(result["text"]) > 100:
+                        logger.info("HWP parsed via HWPX conversion",
+                                   text_length=len(result["text"]))
+                        result["parse_method"] = "hwp_to_hwpx_conversion"
+                        return result
+                    else:
+                        logger.warning("HWPX conversion produced insufficient text",
+                                      text_length=len(result.get("text", "")))
+                finally:
+                    try:
+                        os.unlink(hwpx_path)
+                    except OSError:
+                        pass
+        except Exception as e:
+            logger.warning("HWP→HWPX conversion skipped", error=str(e))
+
+        # [C] Fallback: existing multi-parser strategy
         errors = []
-        
+
         for parser_name, parser_func in self.parsers:
             try:
                 logger.info(f"Trying {parser_name} parser", file=file_path)
                 result = parser_func(file_path)
                 logger.info(f"Successfully parsed with {parser_name}", file=file_path)
+                result["parse_method"] = parser_name
                 return result
             except Exception as e:
                 error_msg = f"{parser_name} failed: {str(e)}"
                 errors.append(error_msg)
                 logger.warning(error_msg, file=file_path)
                 continue
-        
+
         # If all parsers failed
         raise Exception(f"All parsers failed. Errors: {'; '.join(errors)}")
     

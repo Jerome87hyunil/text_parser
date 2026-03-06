@@ -1,131 +1,190 @@
 """
-HWPX Parser implementation.
-HWPX is the new XML-based format for HWP files.
-개선된 버전: 정확한 네임스페이스 처리 및 텍스트 추출
-v2.0: hp10 네임스페이스 지원, 텍스트 정제 개선, 테이블 추출 강화
+HWPX Parser implementation using lxml.
+
+HWPX is the XML-based format for Hancom Office documents (OWPML spec).
+v3.0: lxml + XPath rewrite, markdown output, cell span extraction,
+      no Preview text fallback.
 """
-import structlog
-import zipfile
-import xml.etree.ElementTree as ET
-from typing import Dict, Any, List, Optional, Set
-import os
 import re
+import zipfile
+from typing import Any, Dict, List, Optional
+
+import structlog
+from lxml import etree
 
 logger = structlog.get_logger()
 
+# OWPML namespace map (2011 + 2016 variants)
+NS = {
+    "hp": "http://www.hancom.co.kr/hwpml/2011/paragraph",
+    "hp10": "http://www.hancom.co.kr/hwpml/2016/paragraph",
+    "hs": "http://www.hancom.co.kr/hwpml/2011/section",
+    "hh": "http://www.hancom.co.kr/hwpml/2011/head",
+    "hc": "http://www.hancom.co.kr/hwpml/2011/core",
+}
+
+# Full URIs for the two paragraph namespaces we care about
+_HP_URI = NS["hp"]
+_HP10_URI = NS["hp10"]
+
+# Zero-width / invisible characters to strip
+_ZW_RE = re.compile(r"[\u200b\u200c\u200d\ufeff]")
+
+
+def _find_elements(root: etree._Element, local_name: str) -> List[etree._Element]:
+    """Find elements matching *local_name* in both hp (2011) and hp10 (2016) namespaces."""
+    results: List[etree._Element] = []
+    results.extend(root.xpath(f".//hp:{local_name}", namespaces=NS))
+    results.extend(root.xpath(f".//hp10:{local_name}", namespaces=NS))
+    return results
+
+
+def _local_tag(elem: etree._Element) -> str:
+    """Return the local tag name (without namespace URI)."""
+    tag = elem.tag
+    if isinstance(tag, str) and tag.startswith("{"):
+        return tag.split("}", 1)[1]
+    return tag if isinstance(tag, str) else ""
+
+
+def _tag_ns_uri(elem: etree._Element) -> str:
+    """Return the namespace URI portion of the tag."""
+    tag = elem.tag
+    if isinstance(tag, str) and tag.startswith("{"):
+        return tag[1:].split("}", 1)[0]
+    return ""
+
+
+def _is_paragraph_ns(elem: etree._Element) -> bool:
+    """Check whether the element belongs to hp or hp10 namespace."""
+    uri = _tag_ns_uri(elem)
+    return uri in (_HP_URI, _HP10_URI)
+
+
+def _clean_text(text: str) -> str:
+    """Remove zero-width chars and collapse whitespace."""
+    if not text:
+        return ""
+    cleaned = _ZW_RE.sub("", text)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip()
+
+
+def _table_to_markdown(table: Dict[str, Any]) -> str:
+    """Convert a parsed table dict to a markdown table string.
+
+    The first row is treated as the header.  All cells are padded to equal
+    column widths for readability.
+    """
+    rows: List[List[Dict[str, Any]]] = table.get("rows", [])
+    if not rows:
+        return ""
+
+    col_count = table.get("col_count", 0)
+    if col_count == 0:
+        return ""
+
+    # Flatten cell text into a simple 2-D string grid, respecting col_count
+    str_rows: List[List[str]] = []
+    for row in rows:
+        cells = [cell.get("text", "") for cell in row]
+        # Pad or trim to col_count
+        while len(cells) < col_count:
+            cells.append("")
+        str_rows.append(cells[:col_count])
+
+    # Compute column widths (minimum 3 for the separator)
+    col_widths = [3] * col_count
+    for row in str_rows:
+        for i, cell in enumerate(row):
+            col_widths[i] = max(col_widths[i], len(cell))
+
+    def _fmt_row(cells: List[str]) -> str:
+        padded = [c.ljust(w) for c, w in zip(cells, col_widths)]
+        return "| " + " | ".join(padded) + " |"
+
+    lines: List[str] = []
+    # Header
+    lines.append(_fmt_row(str_rows[0]))
+    # Separator
+    sep = ["-" * w for w in col_widths]
+    lines.append("| " + " | ".join(sep) + " |")
+    # Body
+    for row in str_rows[1:]:
+        lines.append(_fmt_row(row))
+
+    return "\n".join(lines)
+
 
 class HWPXParser:
-    """Parser for HWPX (XML-based HWP) files."""
+    """Parser for HWPX (XML-based HWP) files using lxml + XPath."""
 
-    # HWPX 네임스페이스 정의 (2011/2016 버전 모두 지원)
-    NAMESPACES = {
-        'hp': 'http://www.hancom.co.kr/hwpml/2011/paragraph',
-        'hp10': 'http://www.hancom.co.kr/hwpml/2016/paragraph',
-        'hs': 'http://www.hancom.co.kr/hwpml/2011/section',
-        'hc': 'http://www.hancom.co.kr/hwpml/2011/core',
-        'hh': 'http://www.hancom.co.kr/hwpml/2011/head',
-        'ha': 'http://www.hancom.co.kr/hwpml/2011/app',
-        'hm': 'http://www.hancom.co.kr/hwpml/2011/master-page',
-        'hpf': 'http://www.hancom.co.kr/schema/2011/hpf',
-        'dc': 'http://purl.org/dc/elements/1.1/',
-    }
+    def __init__(self) -> None:
+        pass
 
-    # 텍스트를 추출할 네임스페이스 URI 목록
-    TEXT_NS_URIS: Set[str] = {
-        'http://www.hancom.co.kr/hwpml/2011/paragraph',
-        'http://www.hancom.co.kr/hwpml/2016/paragraph',
-    }
-
-    def __init__(self):
-        # ElementTree에서 네임스페이스 프리픽스 등록
-        for prefix, uri in self.NAMESPACES.items():
-            try:
-                ET.register_namespace(prefix, uri)
-            except ValueError:
-                pass
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
     def parse(self, file_path: str) -> Dict[str, Any]:
-        """
-        Parse HWPX file and extract content.
+        """Parse an HWPX file and return structured content.
 
-        Args:
-            file_path: Path to HWPX file
-
-        Returns:
-            Dict containing extracted content
+        Returns a dict with keys: paragraphs, tables, metadata, text,
+        markdown, structure.
         """
-        result = {
+        result: Dict[str, Any] = {
             "paragraphs": [],
             "tables": [],
-            "images": [],
             "metadata": {},
             "text": "",
-            "structure": {
-                "sections": [],
-                "total_sections": 0
-            }
+            "markdown": "",
+            "structure": {"sections": [], "total_sections": 0},
         }
 
         try:
             logger.info("HWPX 파싱 시작", file_path=file_path)
 
-            with zipfile.ZipFile(file_path, 'r') as zip_file:
-                # 메타데이터 추출
-                result["metadata"] = self._extract_metadata(zip_file)
+            with zipfile.ZipFile(file_path, "r") as zf:
+                result["metadata"] = self._extract_metadata(zf)
 
-                # Preview/PrvText.txt 먼저 시도 (빠른 추출)
-                preview_text = self._extract_preview_text(zip_file)
+                section_roots = self._load_sections(zf)
 
-                # 섹션에서 콘텐츠 추출
-                sections_data = self._extract_sections(zip_file)
+                all_paragraphs: List[Dict[str, Any]] = []
+                all_tables: List[Dict[str, Any]] = []
 
-                all_texts = []
-                all_paragraphs = []
-                all_tables = []
+                for idx, root in enumerate(section_roots):
+                    paragraphs = self._extract_paragraphs(root)
+                    tables = self._extract_tables(root)
 
-                for section_idx, section_root in enumerate(sections_data):
-                    section_info = {
-                        "section_id": f"section{section_idx}",
-                        "paragraph_count": 0,
-                        "table_count": 0
-                    }
+                    result["structure"]["sections"].append(
+                        {
+                            "section_id": f"section{idx}",
+                            "paragraph_count": len(paragraphs),
+                            "table_count": len(tables),
+                        }
+                    )
 
-                    # 텍스트 추출 (새로운 방식)
-                    section_texts = self._extract_all_text_from_section(section_root)
-                    all_texts.extend(section_texts)
-
-                    # 단락 구조 추출
-                    paragraphs = self._extract_paragraphs_from_section(section_root)
-                    section_info["paragraph_count"] = len(paragraphs)
                     all_paragraphs.extend(paragraphs)
-
-                    # 테이블 추출
-                    tables = self._extract_tables_from_section(section_root)
-                    section_info["table_count"] = len(tables)
                     all_tables.extend(tables)
 
-                    result["structure"]["sections"].append(section_info)
-
-                result["structure"]["total_sections"] = len(sections_data)
+                result["structure"]["total_sections"] = len(section_roots)
                 result["paragraphs"] = all_paragraphs
                 result["tables"] = all_tables
 
-                # 텍스트 결합
-                combined_text = '\n'.join(all_texts)
+                # Plain text: paragraph texts joined by newline
+                result["text"] = "\n".join(
+                    p["text"] for p in all_paragraphs if p["text"]
+                )
 
-                # Preview 텍스트와 비교하여 더 나은 결과 선택
-                if preview_text and len(preview_text) > len(combined_text):
-                    logger.info("Preview 텍스트 사용",
-                               preview_len=len(preview_text),
-                               parsed_len=len(combined_text))
-                    result["text"] = preview_text
-                else:
-                    result["text"] = combined_text
+                # Markdown output
+                result["markdown"] = self._build_markdown(all_paragraphs, all_tables)
 
-                logger.info("HWPX 파싱 완료",
-                           text_length=len(result["text"]),
-                           paragraph_count=len(all_paragraphs),
-                           table_count=len(all_tables))
+                logger.info(
+                    "HWPX 파싱 완료",
+                    text_length=len(result["text"]),
+                    paragraph_count=len(all_paragraphs),
+                    table_count=len(all_tables),
+                )
 
         except Exception as e:
             logger.error("HWPX 파싱 오류", error=str(e), file_path=file_path)
@@ -133,295 +192,219 @@ class HWPXParser:
 
         return result
 
-    def _extract_preview_text(self, zip_file: zipfile.ZipFile) -> str:
-        """Preview/PrvText.txt에서 텍스트 추출 (한글에서 자동 생성하는 미리보기 텍스트)"""
-        try:
-            if 'Preview/PrvText.txt' in zip_file.namelist():
-                with zip_file.open('Preview/PrvText.txt') as f:
-                    content = f.read()
-                    # UTF-8 또는 EUC-KR로 디코딩 시도
-                    try:
-                        text = content.decode('utf-8')
-                    except UnicodeDecodeError:
-                        text = content.decode('euc-kr', errors='ignore')
-                    # 텍스트 정제
-                    cleaned = self._clean_preview_text(text)
-                    return cleaned
-        except Exception as e:
-            logger.debug("Preview 텍스트 추출 실패", error=str(e))
-        return ""
+    # ------------------------------------------------------------------
+    # Metadata
+    # ------------------------------------------------------------------
 
-    def _clean_preview_text(self, text: str) -> str:
-        """Preview 텍스트 정제 (구분자 제거, 포맷 정리)
-
-        v2.0: 더 정교한 <> 구분자 처리
-        """
-        if not text:
-            return ""
-
-        # <구분자> 형식 처리
-        # 먼저 ><를 줄바꿈으로 변환
-        cleaned = re.sub(r'>\s*<', '\n', text)
-
-        # 남은 < 와 > 모두 제거
-        cleaned = re.sub(r'[<>]', '', cleaned)
-
-        # 연속 공백 정리
-        cleaned = re.sub(r'[ \t]+', ' ', cleaned)
-
-        # 각 줄 앞뒤 공백 제거
-        lines = [line.strip() for line in cleaned.split('\n')]
-        cleaned = '\n'.join(lines)
-
-        # 연속 줄바꿈 정리 (3개 이상 → 2개)
-        cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
-
-        # 빈 줄 제거 (연속 줄바꿈만 제거하지 않고 빈 줄도 정리)
-        cleaned = re.sub(r'\n\s*\n', '\n', cleaned)
-
-        return cleaned.strip()
-
-    def _extract_metadata(self, zip_file: zipfile.ZipFile) -> Dict[str, Any]:
-        """Extract metadata from HWPX file."""
-        metadata = {}
+    def _extract_metadata(self, zf: zipfile.ZipFile) -> Dict[str, Any]:
+        """Extract metadata from version.xml and Contents/header.xml."""
+        metadata: Dict[str, Any] = {}
 
         try:
-            # version.xml에서 버전 정보
-            if 'version.xml' in zip_file.namelist():
-                with zip_file.open('version.xml') as f:
-                    content = f.read().decode('utf-8')
-                    # 간단히 버전 정보 추출
-                    version_match = re.search(r'version="([^"]*)"', content)
-                    if version_match:
-                        metadata['hwp_version'] = version_match.group(1)
+            if "version.xml" in zf.namelist():
+                with zf.open("version.xml") as f:
+                    content = f.read().decode("utf-8", errors="ignore")
+                    match = re.search(r'version="([^"]*)"', content)
+                    if match:
+                        metadata["hwp_version"] = match.group(1)
 
-            # Contents/header.xml에서 문서 정보
-            if 'Contents/header.xml' in zip_file.namelist():
-                with zip_file.open('Contents/header.xml') as f:
-                    tree = ET.parse(f)
-                    root = tree.getroot()
-                    metadata['has_header'] = True
-
+            if "Contents/header.xml" in zf.namelist():
+                with zf.open("Contents/header.xml") as f:
+                    etree.parse(f)  # validate parseable
+                    metadata["has_header"] = True
         except Exception as e:
             logger.warning("메타데이터 추출 실패", error=str(e))
 
         return metadata
 
-    def _extract_sections(self, zip_file: zipfile.ZipFile) -> List[ET.Element]:
-        """Extract all section data from HWPX."""
-        sections = []
+    # ------------------------------------------------------------------
+    # Section loading
+    # ------------------------------------------------------------------
 
-        try:
-            # Contents 디렉토리에서 section 파일 찾기
-            section_files = sorted([
-                f for f in zip_file.namelist()
-                if f.startswith('Contents/section') and f.endswith('.xml')
-            ])
+    def _load_sections(self, zf: zipfile.ZipFile) -> List[etree._Element]:
+        """Load and parse all Contents/sectionN.xml files."""
+        section_files = sorted(
+            f
+            for f in zf.namelist()
+            if f.startswith("Contents/section") and f.endswith(".xml")
+        )
 
-            logger.debug("섹션 파일 발견", count=len(section_files), files=section_files)
+        logger.debug("섹션 파일 발견", count=len(section_files), files=section_files)
 
-            for section_file in section_files:
-                try:
-                    with zip_file.open(section_file) as sf:
-                        content = sf.read()
-                        root = ET.fromstring(content)
-                        sections.append(root)
-                        logger.debug("섹션 파싱 성공", file=section_file)
-                except ET.ParseError as e:
-                    logger.warning("섹션 XML 파싱 오류", file=section_file, error=str(e))
+        roots: List[etree._Element] = []
+        for sf in section_files:
+            try:
+                with zf.open(sf) as fh:
+                    tree = etree.parse(fh)
+                    roots.append(tree.getroot())
+                    logger.debug("섹션 파싱 성공", file=sf)
+            except etree.XMLSyntaxError as e:
+                logger.warning("섹션 XML 파싱 오류", file=sf, error=str(e))
 
-        except Exception as e:
-            logger.error("섹션 추출 실패", error=str(e))
+        return roots
 
-        return sections
+    # ------------------------------------------------------------------
+    # Paragraph extraction
+    # ------------------------------------------------------------------
 
-    def _extract_all_text_from_section(self, section_root: ET.Element) -> List[str]:
-        """
-        섹션에서 모든 텍스트 추출 (개선된 방식).
+    def _extract_paragraphs(
+        self, section_root: etree._Element
+    ) -> List[Dict[str, Any]]:
+        """Extract top-level paragraphs from a section, skipping those inside subList (table cells)."""
+        paragraphs: List[Dict[str, Any]] = []
 
-        HWPX 구조:
-        - <hp:p> 또는 <hp10:p> (paragraph)
-          - <hp:run> (text run)
-            - <hp:t> (text content)
-        - <hp:tbl> (table)
-          - <hp:tr> (table row)
-            - <hp:tc> (table cell)
-              - <hp:subList>
-                - <hp:p> (paragraph in cell)
+        # Find all <hp:p> / <hp10:p> elements
+        all_p = _find_elements(section_root, "p")
 
-        v2.0: hp10 네임스페이스 (2016) 지원 추가
-        """
-        texts = []
+        for p_elem in all_p:
+            # Skip paragraphs nested inside a subList (they belong to table cells)
+            if self._is_inside_sublist(p_elem):
+                continue
 
-        # 모든 <hp:t> 또는 <hp10:t> (텍스트) 요소에서 직접 텍스트 추출
-        for elem in section_root.iter():
-            tag = elem.tag
+            runs = self._extract_runs(p_elem)
+            full_text = "".join(r["text"] for r in runs)
+            full_text = _clean_text(full_text)
 
-            # 네임스페이스가 있는 경우 로컬 이름 추출
-            if tag.startswith('{'):
-                ns_end = tag.find('}')
-                ns_uri = tag[1:ns_end]
-                local_name = tag[ns_end + 1:]
+            if not full_text:
+                continue
 
-                # hp 또는 hp10 네임스페이스의 't' 요소 (텍스트)
-                if local_name == 't' and ns_uri in self.TEXT_NS_URIS:
-                    if elem.text and elem.text.strip():
-                        # 노이즈 문자 정제
-                        cleaned = self._clean_text_content(elem.text.strip())
-                        if cleaned:
-                            texts.append(cleaned)
+            has_emphasis = any(r.get("bold") or r.get("italic") for r in runs)
 
-        return texts
-
-    def _clean_text_content(self, text: str) -> str:
-        """텍스트 콘텐츠 정제 (노이즈 문자 제거)"""
-        if not text:
-            return ""
-
-        # 제어 문자 및 특수 노이즈 제거 (한글/영어/숫자/기본 문장부호 유지)
-        # 특수 노이즈 패턴: ​ (ZWSP), ‌ (ZWNJ) 등
-        cleaned = re.sub(r'[\u200b\u200c\u200d\ufeff]', '', text)
-
-        # 연속 공백 정리
-        cleaned = re.sub(r'\s+', ' ', cleaned)
-
-        return cleaned.strip()
-
-    def _extract_paragraphs_from_section(self, section_root: ET.Element) -> List[Dict[str, Any]]:
-        """Extract paragraphs from a section element (구조 보존).
-
-        v2.0: hp10 네임스페이스 지원 추가
-        """
-        paragraphs = []
-
-        # hp:p 또는 hp10:p 요소 찾기
-        for elem in section_root.iter():
-            tag = elem.tag
-
-            if tag.startswith('{'):
-                ns_end = tag.find('}')
-                ns_uri = tag[1:ns_end]
-                local_name = tag[ns_end + 1:]
-
-                # hp 또는 hp10 네임스페이스의 'p' 요소 (paragraph)
-                if local_name == 'p' and ns_uri in self.TEXT_NS_URIS:
-                    para_text = self._extract_text_from_paragraph(elem)
-                    if para_text.strip():
-                        paragraphs.append({
-                            "text": self._clean_text_content(para_text.strip()),
-                            "style": self._extract_style_from_element(elem)
-                        })
+            paragraphs.append(
+                {
+                    "text": full_text,
+                    "style": self._extract_style(p_elem),
+                    "has_emphasis": has_emphasis,
+                }
+            )
 
         return paragraphs
 
-    def _extract_text_from_paragraph(self, para_elem: ET.Element) -> str:
-        """단락 요소에서 텍스트 추출 (hp:run/hp:t 또는 hp10:run/hp10:t 구조 처리).
+    def _is_inside_sublist(self, elem: etree._Element) -> bool:
+        """Return True if *elem* has an ancestor with local name 'subList'."""
+        parent = elem.getparent()
+        while parent is not None:
+            if _local_tag(parent) == "subList":
+                return True
+            parent = parent.getparent()
+        return False
 
-        v2.0: hp10 네임스페이스 지원 추가
+    def _extract_runs(self, p_elem: etree._Element) -> List[Dict[str, Any]]:
+        """Extract run-level data from a paragraph element.
+
+        Each run may contain character properties (charPr) indicating bold/italic.
         """
-        texts = []
+        runs: List[Dict[str, Any]] = []
 
-        for elem in para_elem.iter():
-            tag = elem.tag
+        run_elems = _find_elements(p_elem, "run")
+        for run_el in run_elems:
+            # Only consider direct children of this paragraph
+            if run_el.getparent() is not p_elem:
+                # Check if the run is a direct child or nested via another p
+                ancestor_p = run_el.getparent()
+                while ancestor_p is not None and _local_tag(ancestor_p) != "p":
+                    ancestor_p = ancestor_p.getparent()
+                if ancestor_p is not p_elem:
+                    continue
 
-            if tag.startswith('{'):
-                ns_end = tag.find('}')
-                ns_uri = tag[1:ns_end]
-                local_name = tag[ns_end + 1:]
+            texts: List[str] = []
+            t_elems = _find_elements(run_el, "t")
+            for t_el in t_elems:
+                if t_el.text:
+                    texts.append(t_el.text)
 
-                # hp:t 또는 hp10:t 요소의 텍스트 추출
-                if local_name == 't' and ns_uri in self.TEXT_NS_URIS:
-                    if elem.text:
-                        texts.append(elem.text)
+            run_text = "".join(texts)
+            if not run_text:
+                continue
 
-        return ''.join(texts)
+            bold = False
+            italic = False
+            char_prs = _find_elements(run_el, "charPr")
+            for cp in char_prs:
+                if cp.get("bold") == "1":
+                    bold = True
+                if cp.get("italic") == "1":
+                    italic = True
 
-    def _extract_tables_from_section(self, section_root: ET.Element) -> List[Dict[str, Any]]:
-        """Extract tables from a section element.
+            runs.append({"text": run_text, "bold": bold, "italic": italic})
 
-        v2.0: hp10 네임스페이스 지원 추가
-        """
-        tables = []
+        return runs
 
-        for elem in section_root.iter():
-            tag = elem.tag
+    def _extract_style(self, p_elem: etree._Element) -> Dict[str, Any]:
+        """Extract style references from a paragraph element."""
+        style: Dict[str, Any] = {}
+        if p_elem.get("paraPrIDRef"):
+            style["para_style_ref"] = p_elem.get("paraPrIDRef")
+        if p_elem.get("styleIDRef"):
+            style["style_ref"] = p_elem.get("styleIDRef")
+        return style
 
-            if tag.startswith('{'):
-                ns_end = tag.find('}')
-                ns_uri = tag[1:ns_end]
-                local_name = tag[ns_end + 1:]
+    # ------------------------------------------------------------------
+    # Table extraction
+    # ------------------------------------------------------------------
 
-                # hp:tbl 또는 hp10:tbl 요소 (table)
-                if local_name == 'tbl' and ns_uri in self.TEXT_NS_URIS:
-                    table_data = self._parse_table_element(elem)
-                    if table_data:
-                        tables.append(table_data)
+    def _extract_tables(
+        self, section_root: etree._Element
+    ) -> List[Dict[str, Any]]:
+        """Extract all tables from a section."""
+        tables: List[Dict[str, Any]] = []
+
+        tbl_elems = _find_elements(section_root, "tbl")
+        for tbl_el in tbl_elems:
+            table = self._parse_table(tbl_el)
+            if table:
+                tables.append(table)
 
         return tables
 
-    def _extract_style_from_element(self, element: ET.Element) -> Dict[str, Any]:
-        """Extract style information from an element."""
-        style = {}
-
+    def _parse_table(self, tbl_elem: etree._Element) -> Optional[Dict[str, Any]]:
+        """Parse a single table element into structured data with cell span info."""
         try:
-            # 속성에서 스타일 정보 추출
-            if 'paraPrIDRef' in element.attrib:
-                style['para_style_ref'] = element.attrib['paraPrIDRef']
-            if 'styleIDRef' in element.attrib:
-                style['style_ref'] = element.attrib['styleIDRef']
-        except Exception as e:
-            logger.debug("스타일 추출 실패", error=str(e))
+            rows: List[List[Dict[str, Any]]] = []
 
-        return style
+            tr_elems = _find_elements(tbl_elem, "tr")
+            for tr_el in tr_elems:
+                cells: List[Dict[str, Any]] = []
 
-    def _parse_table_element(self, table_elem: ET.Element) -> Optional[Dict[str, Any]]:
-        """Parse a table element and extract its data.
+                tc_elems = _find_elements(tr_el, "tc")
+                for tc_el in tc_elems:
+                    cell_text = self._extract_cell_text(tc_el)
+                    cell_text = _clean_text(cell_text)
 
-        v2.0: hp10 네임스페이스 지원 추가
-        """
-        try:
-            rows = []
+                    # Extract span attributes from cellAddr or tc element itself
+                    col_span = 1
+                    row_span = 1
 
-            # hp:tr 또는 hp10:tr (table row) 요소 찾기
-            for elem in table_elem.iter():
-                tag = elem.tag
+                    # cellAddr may carry colSpan/rowSpan
+                    cell_addrs = _find_elements(tc_el, "cellAddr")
+                    if cell_addrs:
+                        addr = cell_addrs[0]
+                        col_span = int(addr.get("colSpan", "1") or "1")
+                        row_span = int(addr.get("rowSpan", "1") or "1")
 
-                if not tag.startswith('{'):
-                    continue
+                    # Some HWPX files store span on <tc> directly
+                    if col_span == 1 and tc_el.get("colSpan"):
+                        col_span = int(tc_el.get("colSpan", "1") or "1")
+                    if row_span == 1 and tc_el.get("rowSpan"):
+                        row_span = int(tc_el.get("rowSpan", "1") or "1")
 
-                ns_end = tag.find('}')
-                ns_uri = tag[1:ns_end]
-                local_name = tag[ns_end + 1:]
+                    cells.append(
+                        {
+                            "text": cell_text,
+                            "colSpan": col_span,
+                            "rowSpan": row_span,
+                        }
+                    )
 
-                # hp:tr 또는 hp10:tr 요소 (table row)
-                if local_name == 'tr' and ns_uri in self.TEXT_NS_URIS:
-                    cells = []
-
-                    # hp:tc 또는 hp10:tc (table cell) 요소 찾기
-                    for cell_elem in elem.iter():
-                        cell_tag = cell_elem.tag
-
-                        if not cell_tag.startswith('{'):
-                            continue
-
-                        cell_ns_end = cell_tag.find('}')
-                        cell_ns_uri = cell_tag[1:cell_ns_end]
-                        cell_local_name = cell_tag[cell_ns_end + 1:]
-
-                        # hp:tc 또는 hp10:tc 요소
-                        if cell_local_name == 'tc' and cell_ns_uri in self.TEXT_NS_URIS:
-                            cell_text = self._extract_text_from_cell(cell_elem)
-                            cleaned = self._clean_text_content(cell_text)
-                            cells.append(cleaned)
-
-                    if cells:
-                        rows.append(cells)
+                if cells:
+                    rows.append(cells)
 
             if rows:
+                max_cols = max(len(row) for row in rows)
                 return {
                     "rows": rows,
                     "row_count": len(rows),
-                    "col_count": max(len(row) for row in rows) if rows else 0
+                    "col_count": max_cols,
                 }
 
         except Exception as e:
@@ -429,38 +412,62 @@ class HWPXParser:
 
         return None
 
-    def _extract_text_from_cell(self, cell_elem: ET.Element) -> str:
-        """테이블 셀에서 텍스트 추출.
+    def _extract_cell_text(self, tc_elem: etree._Element) -> str:
+        """Extract all text from a table cell (via subList > p > run > t)."""
+        texts: List[str] = []
 
-        v2.0: hp10 네임스페이스 지원 추가
+        t_elems = _find_elements(tc_elem, "t")
+        for t_el in t_elems:
+            if t_el.text:
+                texts.append(t_el.text)
+
+        return " ".join(texts)
+
+    # ------------------------------------------------------------------
+    # Markdown generation
+    # ------------------------------------------------------------------
+
+    def _build_markdown(
+        self,
+        paragraphs: List[Dict[str, Any]],
+        tables: List[Dict[str, Any]],
+    ) -> str:
+        """Build a markdown string from paragraphs and tables.
+
+        Tables are inserted after the last paragraph that precedes them
+        (best-effort ordering based on sequential index).
         """
-        texts = []
+        parts: List[str] = []
 
-        for elem in cell_elem.iter():
-            tag = elem.tag
+        # Simple strategy: paragraphs first, then tables at the end.
+        # A more precise interleaving would require positional info from the XML,
+        # which we don't track.  This gives a readable output.
+        for p in paragraphs:
+            text = p["text"]
+            if p.get("has_emphasis"):
+                parts.append(f"**{text}**")
+            else:
+                parts.append(text)
 
-            if tag.startswith('{'):
-                ns_end = tag.find('}')
-                ns_uri = tag[1:ns_end]
-                local_name = tag[ns_end + 1:]
+        for tbl in tables:
+            md = _table_to_markdown(tbl)
+            if md:
+                parts.append("")  # blank line before table
+                parts.append(md)
+                parts.append("")  # blank line after table
 
-                # hp:t 또는 hp10:t 요소의 텍스트 추출
-                if local_name == 't' and ns_uri in self.TEXT_NS_URIS:
-                    if elem.text:
-                        texts.append(elem.text)
+        return "\n".join(parts)
 
-        return ' '.join(texts)
+
+# ------------------------------------------------------------------
+# Module-level convenience function (backward compatibility)
+# ------------------------------------------------------------------
 
 
 def parse(file_path: str) -> Dict[str, Any]:
-    """
-    Parse HWPX file using HWPXParser.
+    """Parse an HWPX file and return structured content.
 
-    Args:
-        file_path: Path to HWPX file
-
-    Returns:
-        Dict containing extracted content
+    This is the module-level entry point kept for backward compatibility.
     """
     parser = HWPXParser()
     return parser.parse(file_path)
